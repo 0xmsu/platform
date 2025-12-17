@@ -50,11 +50,79 @@ pub enum NetworkMessage {
     /// Used for secure submissions, ACKs, evaluations, weights
     ChallengeMessage(ChallengeNetworkMessage),
 
+    /// Real-time task progress update (for evaluation tracking)
+    TaskProgress(TaskProgressMessage),
+
     /// Version incompatible - disconnect
     VersionMismatch {
         our_version: String,
         required_min_version: String,
     },
+}
+
+/// Real-time task progress message
+/// Broadcast when each task in an evaluation completes
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskProgressMessage {
+    /// Challenge ID
+    pub challenge_id: String,
+    /// Agent being evaluated
+    pub agent_hash: String,
+    /// Evaluation ID (unique per evaluation run)
+    pub evaluation_id: String,
+    /// Task ID that completed
+    pub task_id: String,
+    /// Task index (1-based for display)
+    pub task_index: u32,
+    /// Total number of tasks
+    pub total_tasks: u32,
+    /// Whether this task passed
+    pub passed: bool,
+    /// Task score (0.0 - 1.0)
+    pub score: f64,
+    /// Execution time in milliseconds
+    pub execution_time_ms: u64,
+    /// Cost in USD for this task
+    pub cost_usd: f64,
+    /// Error message if task failed
+    pub error: Option<String>,
+    /// Validator performing the evaluation
+    pub validator_hotkey: String,
+    /// Timestamp
+    pub timestamp: u64,
+}
+
+impl TaskProgressMessage {
+    pub fn new(
+        challenge_id: String,
+        agent_hash: String,
+        evaluation_id: String,
+        task_id: String,
+        task_index: u32,
+        total_tasks: u32,
+        passed: bool,
+        score: f64,
+        execution_time_ms: u64,
+        cost_usd: f64,
+        error: Option<String>,
+        validator_hotkey: String,
+    ) -> Self {
+        Self {
+            challenge_id,
+            agent_hash,
+            evaluation_id,
+            task_id,
+            task_index,
+            total_tasks,
+            passed,
+            score,
+            execution_time_ms,
+            cost_usd,
+            error,
+            validator_hotkey,
+            timestamp: chrono::Utc::now().timestamp() as u64,
+        }
+    }
 }
 
 /// Challenge-specific network message

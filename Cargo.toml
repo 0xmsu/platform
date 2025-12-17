@@ -26,11 +26,11 @@ members = [
 version = "0.1.0"
 edition = "2021"
 authors = ["Platform Network"]
-license = "MIT"
+license = "Apache-2.0"
 
 [workspace.dependencies]
-# Bittensor (with CRv4 timelock encryption support)
-bittensor-rs = { git = "https://github.com/CortexLM/bittensor-rs", rev = "39e6ea3" }
+# Bittensor (with CRv4 timelock encryption support and new Subtensor API)
+bittensor-rs = { git = "https://github.com/CortexLM/bittensor-rs", rev = "0614e74" }
 
 # Async runtime
 tokio = { version = "1.40", features = ["full", "sync", "macros", "rt-multi-thread"] }
@@ -51,7 +51,7 @@ sp-core = "38.1.0"
 parity-scale-codec = { version = "3.7.5", features = ["derive"] }
 
 # P2P Networking
-libp2p = { version = "0.54", features = ["tokio", "noise", "yamux", "tcp", "gossipsub", "mdns", "request-response", "macros", "identify", "cbor", "serde"] }
+libp2p = { version = "0.54", features = ["tokio", "noise", "yamux", "tcp", "dns", "gossipsub", "mdns", "request-response", "macros", "identify", "cbor", "serde"] }
 
 # Storage
 sled = "0.34"

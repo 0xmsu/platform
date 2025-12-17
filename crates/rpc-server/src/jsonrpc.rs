@@ -185,6 +185,8 @@ pub struct RpcHandler {
     pub challenge_routes: Arc<RwLock<HashMap<String, Vec<ChallengeRoute>>>>,
     /// Challenge route handler callback
     pub route_handler: Arc<RwLock<Option<ChallengeRouteHandler>>>,
+    /// Channel to send signed messages for P2P broadcast
+    pub broadcast_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>,
 }
 
 impl RpcHandler {
@@ -198,7 +200,13 @@ impl RpcHandler {
             peers: Arc::new(RwLock::new(Vec::new())),
             challenge_routes: Arc::new(RwLock::new(HashMap::new())),
             route_handler: Arc::new(RwLock::new(None)),
+            broadcast_tx: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set the broadcast channel for P2P message sending
+    pub fn set_broadcast_tx(&self, tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>) {
+        *self.broadcast_tx.write() = Some(tx);
     }
 
     /// Register routes for a challenge
@@ -316,6 +324,12 @@ impl RpcHandler {
 
             // RPC info
             ["rpc", "methods"] => self.rpc_methods(req.id),
+
+            // Sudo namespace (for subnet owner actions)
+            ["sudo", "submit"] => self.sudo_submit(req.id, req.params),
+
+            // Dev namespace (for local testing)
+            ["dev", "addChallenge"] => self.dev_add_challenge(req.id, req.params),
 
             _ => {
                 warn!("Unknown RPC method: {}", req.method);
@@ -765,7 +779,8 @@ impl RpcHandler {
         let routes = self.challenge_routes.read();
         let only_active = self.get_param_bool(&params, "onlyActive").unwrap_or(false);
 
-        let challenges: Vec<Value> = chain
+        // Get WASM challenges
+        let mut challenges: Vec<Value> = chain
             .challenges
             .values()
             .filter(|c| !only_active || c.is_active)
@@ -783,9 +798,27 @@ impl RpcHandler {
                     "emissionWeight": c.config.emission_weight,
                     "timeoutSecs": c.config.timeout_secs,
                     "routesCount": challenge_routes,
+                    "type": "wasm",
                 })
             })
             .collect();
+
+        // Also include Docker challenge configs
+        for (cid, config) in chain.challenge_configs.iter() {
+            let challenge_routes = routes.get(&cid.to_string()).map(|r| r.len()).unwrap_or(0);
+            challenges.push(json!({
+                "id": cid.to_string(),
+                "name": config.name,
+                "description": format!("Docker challenge: {}", config.docker_image),
+                "dockerImage": config.docker_image,
+                "isActive": true,
+                "mechanismId": config.mechanism_id,
+                "emissionWeight": config.emission_weight,
+                "timeoutSecs": config.timeout_secs,
+                "routesCount": challenge_routes,
+                "type": "docker",
+            }));
+        }
 
         JsonRpcResponse::result(
             id,
@@ -1111,6 +1144,166 @@ impl RpcHandler {
     /// Remove a peer
     pub fn remove_peer(&self, peer: &str) {
         self.peers.write().retain(|p| p != peer);
+    }
+
+    // ==================== Sudo Namespace ====================
+
+    /// Submit a signed sudo action to be broadcast via P2P
+    /// This allows csudo to submit actions via RPC instead of running its own P2P node
+    fn sudo_submit(&self, id: Value, params: Value) -> JsonRpcResponse {
+        // Get the signed message bytes (hex-encoded)
+        let message_hex = match self.get_param_str(&params, 0, "signedMessage") {
+            Some(m) => m,
+            None => return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing 'signedMessage' parameter (hex-encoded)"),
+        };
+
+        // Decode hex to bytes
+        let message_bytes = match hex::decode(&message_hex) {
+            Ok(b) => b,
+            Err(e) => return JsonRpcResponse::error(id, INVALID_PARAMS, format!("Invalid hex: {}", e)),
+        };
+
+        // Verify it's a valid SignedNetworkMessage
+        let signed: platform_core::SignedNetworkMessage = match bincode::deserialize(&message_bytes) {
+            Ok(s) => s,
+            Err(e) => return JsonRpcResponse::error(id, INVALID_PARAMS, format!("Invalid message format: {}", e)),
+        };
+
+        // Verify signature
+        if !signed.verify().unwrap_or(false) {
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "Invalid signature");
+        }
+
+        // Check if it's from the sudo key
+        let (is_sudo, chain_sudo_key) = {
+            let state = self.chain_state.read();
+            (state.is_sudo(signed.signer()), state.sudo_key.to_hex())
+        };
+
+        if !is_sudo {
+            info!("Sudo check failed: signer={} chain_sudo={}", signed.signer().to_hex(), chain_sudo_key);
+            return JsonRpcResponse::error(id, INVALID_PARAMS, 
+                format!("Signer {} is not the sudo key {}", signed.signer().to_hex(), chain_sudo_key));
+        }
+
+        // Also apply locally since gossipsub doesn't echo back to sender
+        // Check if this is a Proposal containing SudoAction::AddChallenge
+        if let platform_core::NetworkMessage::Proposal(ref proposal) = signed.message {
+            if let platform_core::ProposalAction::Sudo(platform_core::SudoAction::AddChallenge { config }) = &proposal.action {
+                // Apply locally
+                let mut chain = self.chain_state.write();
+                chain.challenge_configs.insert(config.challenge_id, config.clone());
+                info!("Applied AddChallenge locally: {} ({})", config.name, config.challenge_id);
+
+                // Also register routes
+                drop(chain);
+                use platform_challenge_sdk::ChallengeRoute;
+                let routes = vec![
+                    ChallengeRoute::post("/submit", "Submit an agent"),
+                    ChallengeRoute::get("/status/:hash", "Get agent status"),
+                    ChallengeRoute::get("/leaderboard", "Get leaderboard"),
+                    ChallengeRoute::get("/config", "Get challenge config"),
+                    ChallengeRoute::get("/stats", "Get statistics"),
+                    ChallengeRoute::get("/health", "Health check"),
+                ];
+                self.register_challenge_routes(&config.name, routes);
+            }
+        }
+
+        // Send to broadcast channel for P2P propagation
+        let tx = self.broadcast_tx.read();
+        match tx.as_ref() {
+            Some(sender) => {
+                if let Err(e) = sender.send(message_bytes.clone()) {
+                    return JsonRpcResponse::error(id, INTERNAL_ERROR, format!("Failed to queue broadcast: {}", e));
+                }
+                info!("Sudo action queued for P2P broadcast from {}", signed.signer());
+            }
+            None => {
+                return JsonRpcResponse::error(id, INTERNAL_ERROR, "Broadcast channel not configured");
+            }
+        }
+
+        JsonRpcResponse::result(
+            id,
+            json!({
+                "success": true,
+                "message": "Sudo action applied locally and queued for P2P broadcast",
+                "signer": signed.signer().to_hex(),
+            }),
+        )
+    }
+
+    // ==================== Dev Namespace (Local Testing Only) ====================
+
+    /// Add a challenge directly (bypasses P2P consensus - dev only!)
+    fn dev_add_challenge(&self, id: Value, params: Value) -> JsonRpcResponse {
+        use platform_core::{ChallengeContainerConfig, ChallengeId};
+
+        // Parse parameters
+        let name = match self.get_param_str(&params, 0, "name") {
+            Some(n) => n,
+            None => return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing 'name' parameter"),
+        };
+
+        let docker_image = match self.get_param_str(&params, 1, "dockerImage") {
+            Some(i) => i,
+            None => return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing 'dockerImage' parameter"),
+        };
+
+        let mechanism_id = self.get_param_u64(&params, 2, "mechanismId").unwrap_or(1) as u8;
+        let emission_weight = params.get("emissionWeight")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0);
+
+        // Create challenge config
+        let config = ChallengeContainerConfig {
+            challenge_id: ChallengeId::new(),
+            name: name.clone(),
+            docker_image: docker_image.clone(),
+            mechanism_id,
+            emission_weight,
+            timeout_secs: 3600,
+            cpu_cores: 2.0,
+            memory_mb: 4096,
+            gpu_required: false,
+        };
+
+        // Add to chain state directly (dev mode bypass)
+        {
+            let mut chain = self.chain_state.write();
+            let challenge_id = config.challenge_id;
+            chain.challenge_configs.insert(challenge_id, config.clone());
+            info!("DEV: Added challenge '{}' ({})", name, challenge_id);
+        }
+
+        // Register standard routes using the challenge NAME (not UUID)
+        // This allows users to access routes via /challenge/term-bench/config
+        use platform_challenge_sdk::ChallengeRoute;
+        let routes = vec![
+            ChallengeRoute::post("/submit", "Submit an agent"),
+            ChallengeRoute::get("/status/:hash", "Get agent status"),
+            ChallengeRoute::get("/leaderboard", "Get leaderboard"),
+            ChallengeRoute::get("/config", "Get challenge config"),
+            ChallengeRoute::get("/stats", "Get statistics"),
+            ChallengeRoute::get("/health", "Health check"),
+        ];
+        self.register_challenge_routes(&name, routes);
+        info!("DEV: Registered routes for challenge '{}' at /challenge/{}/", name, name);
+
+        JsonRpcResponse::result(
+            id,
+            json!({
+                "success": true,
+                "challengeId": config.challenge_id.to_string(),
+                "name": name,
+                "dockerImage": docker_image,
+                "mechanismId": mechanism_id,
+                "routesRegistered": 6,
+                "routePath": format!("/challenge/{}/", name),
+                "message": "Challenge added with routes (dev mode - no P2P consensus)"
+            }),
+        )
     }
 }
 

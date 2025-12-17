@@ -3,7 +3,7 @@
 use crate::behaviour::{MiniChainBehaviour, MiniChainBehaviourEvent, SyncRequest, SyncResponse};
 use futures::StreamExt;
 use libp2p::{
-    gossipsub,
+    gossipsub, identify,
     identity::Keypair,
     mdns, noise,
     request_response::{self, ResponseChannel},
@@ -110,6 +110,7 @@ impl NetworkNode {
                 noise::Config::new,
                 yamux::Config::default,
             )?
+            .with_dns()?
             .with_behaviour(|_| behaviour)?
             .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(config.idle_timeout))
             .build();
@@ -163,6 +164,12 @@ impl NetworkNode {
         let data = bincode::serialize(message)?;
         self.swarm.behaviour_mut().publish(data)?;
         debug!("Broadcast message: {:?}", message.message);
+        Ok(())
+    }
+
+    /// Broadcast raw bytes via gossip (for pre-serialized messages)
+    pub fn broadcast_raw(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
+        self.swarm.behaviour_mut().publish(data)?;
         Ok(())
     }
 
@@ -281,8 +288,36 @@ impl NetworkNode {
                     debug!("Sync response from {}: {:?}", peer, response);
                 }
             },
+            MiniChainBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. }) => {
+                // When we receive identify info from a peer, learn about their listen addresses
+                info!("Identify received from {}: {:?}", peer_id, info.listen_addrs);
+                
+                // Add to gossipsub mesh
+                self.swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .add_explicit_peer(&peer_id);
+                
+                // Also connect to other peers they know about through their observed addr
+                // This helps with peer discovery in small networks
+                for addr in info.listen_addrs {
+                    // Only dial if it's a different peer and looks like a valid address
+                    if !self.peers.read().contains(&peer_id) {
+                        debug!("Discovered peer address via identify: {}", addr);
+                    }
+                }
+            }
+            MiniChainBehaviourEvent::Identify(identify::Event::Sent { peer_id, .. }) => {
+                debug!("Identify sent to {}", peer_id);
+            }
             _ => {}
         }
+    }
+
+    /// Add a peer to connect to
+    pub fn dial_peer(&mut self, addr: Multiaddr) -> anyhow::Result<()> {
+        self.swarm.dial(addr)?;
+        Ok(())
     }
 }
 

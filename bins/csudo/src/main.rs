@@ -11,7 +11,8 @@ use platform_core::{
     ChainState, ChallengeContainerConfig, ChallengeId, Hotkey, Keypair, NetworkConfig,
     SignedNetworkMessage, Stake, SudoAction, ValidatorInfo,
 };
-use platform_network::{NetworkNode, NodeConfig};
+// NetworkNode no longer needed - using RPC for broadcast
+// use platform_network::{NetworkNode, NodeConfig};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::info;
@@ -188,13 +189,17 @@ async fn main() -> Result<()> {
     let keypair = {
         let secret = &args.secret_key;
 
+        // Strip 0x prefix if present
+        let hex_str = secret.strip_prefix("0x").unwrap_or(secret);
+
         // Try hex decode first
-        if let Ok(bytes) = hex::decode(secret) {
+        if let Ok(bytes) = hex::decode(hex_str) {
             if bytes.len() != 32 {
                 anyhow::bail!("Hex secret key must be 32 bytes");
             }
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&bytes);
+            info!("Loaded keypair from hex secret");
             Keypair::from_bytes(&arr)?
         } else {
             // Assume it's a mnemonic phrase - derive keypair from it
@@ -502,37 +507,62 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Connect to network and send action
-    info!("Connecting to network...");
-
-    let node_config = NodeConfig {
-        listen_addr: "/ip4/0.0.0.0/tcp/0".parse()?,
-        bootstrap_peers: vec![args.peer.parse()?],
-        ..Default::default()
-    };
-
-    let mut network = NetworkNode::new(node_config.clone()).await?;
-    network.start(&node_config).await?;
-
-    // Wait for connection
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-    // Propose the sudo action
-    info!("Proposing sudo action...");
+    // Create signed messages for the sudo action
+    info!("Creating signed sudo action...");
     let proposal_id = consensus.propose_sudo(action).await?;
-    info!("Proposal submitted: {:?}", proposal_id);
+    info!("Proposal created: {:?}", proposal_id);
 
-    // Send messages from consensus
-    tokio::spawn(async move {
-        while let Some(msg) = msg_rx.recv().await {
-            // In a real implementation, we'd broadcast this
-            info!("Would broadcast: {:?}", msg.message);
+    // Collect all messages to broadcast
+    let mut messages_to_send: Vec<SignedNetworkMessage> = Vec::new();
+    while let Ok(msg) = msg_rx.try_recv() {
+        messages_to_send.push(msg);
+    }
+
+    if messages_to_send.is_empty() {
+        eprintln!("No messages generated - action may have failed");
+        return Ok(());
+    }
+
+    // Submit each message via RPC
+    info!("Submitting {} messages via RPC to {}...", messages_to_send.len(), args.rpc);
+    let client = reqwest::Client::new();
+    
+    for msg in &messages_to_send {
+        let serialized = bincode::serialize(&msg)?;
+        let hex_encoded = hex::encode(&serialized);
+        
+        let rpc_url = if args.rpc.ends_with("/rpc") {
+            args.rpc.clone()
+        } else {
+            format!("{}/rpc", args.rpc.trim_end_matches('/'))
+        };
+
+        let response = client
+            .post(&rpc_url)
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "sudo_submit",
+                "params": {
+                    "signedMessage": hex_encoded
+                },
+                "id": 1
+            }))
+            .send()
+            .await?;
+
+        let result: serde_json::Value = response.json().await?;
+        
+        if let Some(error) = result.get("error") {
+            eprintln!("RPC Error: {}", error);
+            return Ok(());
         }
-    });
+        
+        if let Some(res) = result.get("result") {
+            info!("Message submitted: {:?}", res);
+        }
+    }
 
-    // Wait for consensus (simplified - in real impl would wait for votes)
-    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-
-    info!("Action submitted. Check validator logs for consensus result.");
+    info!("Action submitted successfully via RPC!");
     Ok(())
 }
