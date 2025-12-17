@@ -54,7 +54,7 @@ impl JobScheduler {
         self.pending
             .write()
             .entry(challenge_id)
-            .or_insert_with(VecDeque::new)
+            .or_default()
             .push_back(job);
 
         self.pending_count.fetch_add(1, Ordering::SeqCst);

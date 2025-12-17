@@ -1,4 +1,5 @@
 #![allow(dead_code, unused_variables, unused_imports)]
+#![allow(ambiguous_glob_reexports)]
 //! Persistent storage using sled
 //!
 //! This module provides:

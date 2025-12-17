@@ -265,12 +265,9 @@ impl UpdateManager {
                     update.rollback_data = Some(std::fs::read(&config_path)?);
                 }
 
-                new_config.save(&config_path).map_err(|e| {
-                    UpdateError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ))
-                })?;
+                new_config
+                    .save(&config_path)
+                    .map_err(|e| UpdateError::Io(std::io::Error::other(e.to_string())))?;
                 *self.current_version.write() = new_config.version.clone();
 
                 info!("Config updated to version {}", new_config.version);
@@ -313,12 +310,7 @@ impl UpdateManager {
                 if let Some(config) = new_config {
                     config
                         .save(&self.data_dir.join("subnet_config.json"))
-                        .map_err(|e| {
-                            UpdateError::Io(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                e.to_string(),
-                            ))
-                        })?;
+                        .map_err(|e| UpdateError::Io(std::io::Error::other(e.to_string())))?;
                 }
 
                 info!("Hard reset complete");
@@ -426,8 +418,10 @@ mod tests {
         let manager = UpdateManager::new(dir.path().to_path_buf());
 
         // Queue a config update with explicit version
-        let mut config = SubnetConfig::default();
-        config.version = "0.2.0".to_string();
+        let config = SubnetConfig {
+            version: "0.2.0".to_string(),
+            ..Default::default()
+        };
 
         let id = manager.queue_update(
             UpdateTarget::Config,

@@ -111,7 +111,7 @@ impl WeightAggregator {
         for dist in distributions {
             by_agent
                 .entry(dist.agent_hash.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(dist);
         }
 

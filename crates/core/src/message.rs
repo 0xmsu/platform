@@ -93,6 +93,7 @@ pub struct TaskProgressMessage {
 }
 
 impl TaskProgressMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         challenge_id: String,
         agent_hash: String,
@@ -256,6 +257,7 @@ impl HandshakeMessage {
 
 /// Sudo actions that only the subnet owner can perform
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum SudoAction {
     // === Network Configuration ===
     /// Update network configuration
@@ -544,6 +546,7 @@ impl Proposal {
 
 /// Actions that can be proposed for consensus
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum ProposalAction {
     /// Sudo action (only from subnet owner)
     Sudo(SudoAction),
@@ -631,6 +634,7 @@ impl EvaluationResult {
 
 /// State synchronization message
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum StateSyncMessage {
     /// Request state snapshot
     RequestSnapshot,
@@ -1022,7 +1026,7 @@ mod tests {
     #[test]
     fn test_sudo_action_remove_challenge() {
         let id = ChallengeId::new();
-        let action = SudoAction::RemoveChallenge { id: id.clone() };
+        let action = SudoAction::RemoveChallenge { id };
 
         match action {
             SudoAction::RemoveChallenge { id: i } => {
@@ -1094,9 +1098,9 @@ mod tests {
 
         let result = EvaluationResult::new(
             job_id,
-            challenge_id.clone(),
+            challenge_id,
             "agent123".to_string(),
-            score.clone(),
+            score,
             100,
             kp.hotkey(),
         );
@@ -1111,8 +1115,7 @@ mod tests {
     fn test_weight_commitment_message() {
         let hotkey = Hotkey([5u8; 32]);
         let challenge_id = ChallengeId::new();
-        let commitment =
-            WeightCommitmentMessage::new(hotkey.clone(), challenge_id.clone(), 10, [0xab; 32]);
+        let commitment = WeightCommitmentMessage::new(hotkey.clone(), challenge_id, 10, [0xab; 32]);
 
         assert_eq!(commitment.validator, hotkey);
         assert_eq!(commitment.challenge_id, challenge_id);
@@ -1134,13 +1137,8 @@ mod tests {
                 weight: 0.3,
             },
         ];
-        let reveal = WeightRevealMessage::new(
-            hotkey.clone(),
-            challenge_id.clone(),
-            10,
-            weights,
-            vec![1, 2, 3, 4],
-        );
+        let reveal =
+            WeightRevealMessage::new(hotkey.clone(), challenge_id, 10, weights, vec![1, 2, 3, 4]);
 
         assert_eq!(reveal.validator, hotkey);
         assert_eq!(reveal.challenge_id, challenge_id);
@@ -1258,7 +1256,7 @@ mod tests {
         let score = Score::new(0.95, 1.0);
         let action = ProposalAction::JobCompletion {
             job_id,
-            result: score.clone(),
+            result: score,
             validator: hotkey.clone(),
         };
         match action {

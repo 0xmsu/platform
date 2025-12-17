@@ -336,7 +336,7 @@ mod tests {
 
         // Check normalization (should sum close to 65535)
         let sum: u32 = mech_weights.weights.iter().map(|w| *w as u32).sum();
-        assert!(sum >= 65530 && sum <= 65540); // Allow small rounding error
+        assert!((65530..=65540).contains(&sum)); // Allow small rounding error
     }
 
     #[test]

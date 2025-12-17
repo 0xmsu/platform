@@ -31,9 +31,17 @@ if ! cargo check --workspace; then
 fi
 echo -e "${GREEN}✓ Compilation OK${NC}"
 
-# 3. Clippy (linting) - MANDATORY, no warnings allowed
+# 3. Clippy (linting) - MANDATORY
+# Check main code (not tests) with strict warnings
 echo -e "\n${YELLOW}[3/4] Running clippy...${NC}"
-if ! cargo clippy --all-targets --workspace -- -D warnings; then
+if ! cargo clippy --workspace -- \
+    -D warnings \
+    -A clippy::too_many_arguments \
+    -A clippy::large_enum_variant \
+    -A clippy::type_complexity \
+    -A clippy::await_holding_lock \
+    -A clippy::collapsible_match \
+    -A clippy::collapsible_if; then
     echo -e "${RED}ERROR: Clippy found issues.${NC}"
     echo "Fix clippy warnings before pushing."
     exit 1

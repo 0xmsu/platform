@@ -1,7 +1,7 @@
 //! Tests for Bittensor integration
 
 #[cfg(test)]
-mod tests {
+mod bittensor_tests {
     use crate::{BittensorConfig, SubtensorClient, WeightSubmitter, DEFAULT_NETUID};
     use platform_challenge_sdk::WeightAssignment;
 

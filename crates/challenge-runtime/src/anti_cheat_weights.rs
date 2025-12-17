@@ -324,7 +324,7 @@ impl AntiCheatWeightCalculator {
             0.0
         } else {
             let mid = score_values.len() / 2;
-            if score_values.len() % 2 == 0 {
+            if score_values.len().is_multiple_of(2) {
                 (score_values[mid - 1] + score_values[mid]) / 2.0
             } else {
                 score_values[mid]
@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_validator_flagging() {
-        let mut config = AntiCheatConfig {
+        let config = AntiCheatConfig {
             min_validators: 3,
             enable_slashing_detection: true,
             slash_threshold: 2,

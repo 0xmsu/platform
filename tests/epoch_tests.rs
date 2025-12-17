@@ -4,7 +4,6 @@
 
 use parking_lot::RwLock;
 use platform_core::*;
-use platform_epoch::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -460,7 +459,7 @@ mod mechanism_weights {
 
     #[test]
     fn test_mechanism_weights_sum() {
-        let weights = vec![
+        let weights = [
             MechanismWeight {
                 mechanism_id: 0,
                 weight: 0.3,

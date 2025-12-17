@@ -1,5 +1,7 @@
 //! Distributed Database for Mini-Chain
 //!
+#![allow(dead_code)]
+#![allow(unused_variables)]
 //! A decentralized storage system with:
 //! - **Optimistic Execution**: Apply transactions immediately, confirm at Bittensor block
 //! - **Merkle State Root**: Verifiable state integrity

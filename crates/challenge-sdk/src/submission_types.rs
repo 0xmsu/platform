@@ -36,6 +36,7 @@ pub struct EncryptedSubmission {
 
 impl EncryptedSubmission {
     /// Create a new encrypted submission
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         challenge_id: String,
         miner_hotkey: String,

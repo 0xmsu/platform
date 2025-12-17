@@ -407,7 +407,7 @@ mod stats_tests {
 
     #[test]
     fn test_storage_size_calculation() {
-        let entries = vec![100, 200, 300, 400];
+        let entries = [100, 200, 300, 400];
         let total: usize = entries.iter().sum();
         assert_eq!(total, 1000);
     }

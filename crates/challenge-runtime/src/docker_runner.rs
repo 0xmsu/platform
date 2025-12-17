@@ -434,7 +434,7 @@ impl DockerRunner {
         let work_dir = self
             .config
             .work_dir_base
-            .join(&format!("verify-{}", execution_id));
+            .join(format!("verify-{}", execution_id));
         tokio::fs::create_dir_all(&work_dir)
             .await
             .map_err(|e| format!("Failed to create work dir: {}", e))?;

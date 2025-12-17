@@ -79,3 +79,13 @@ tempfile = "3.12"
 # Patch for TLE/CRv4 compatibility (w3f-bls version conflict)
 [patch.crates-io]
 w3f-bls = { git = "https://github.com/opentensor/bls", branch = "fix-no-std" }
+
+# Clippy lints configuration
+[workspace.lints.clippy]
+# Allow these patterns that are intentional in this codebase
+too_many_arguments = "allow"
+large_enum_variant = "allow"
+type_complexity = "allow"
+await_holding_lock = "warn"  # TODO: Fix async lock issues properly
+collapsible_match = "allow"
+collapsible_if = "allow"

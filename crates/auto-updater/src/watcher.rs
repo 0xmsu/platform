@@ -8,6 +8,7 @@ use tokio::sync::broadcast;
 use tracing::info;
 
 /// Watches for version updates from the network
+#[allow(dead_code)]
 pub struct VersionWatcher {
     current_version: Version,
     required_version: Arc<RwLock<Option<UpdateRequirement>>>,

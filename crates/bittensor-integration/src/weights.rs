@@ -206,7 +206,7 @@ impl WeightSubmitter {
 
         let state = PersistedCommitState::load(&persist_path);
 
-        if state.pending_mechanism_commits.len() > 0 {
+        if !state.pending_mechanism_commits.is_empty() {
             info!(
                 "Loaded {} pending commits from previous session (epoch {:?})",
                 state.pending_mechanism_commits.len(),
@@ -573,8 +573,7 @@ impl WeightSubmitter {
     ) -> Result<String> {
         use bittensor_rs::validator::utility::batch_set_mechanism_weights;
 
-        let weights_for_batch: Vec<(u8, Vec<u16>, Vec<u16>)> =
-            mechanism_weights.iter().cloned().collect();
+        let weights_for_batch: Vec<(u8, Vec<u16>, Vec<u16>)> = mechanism_weights.to_vec();
 
         info!(
             "Batch submitting weights directly for {} mechanisms",

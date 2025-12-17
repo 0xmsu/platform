@@ -3,8 +3,8 @@
 use parking_lot::RwLock;
 use platform_consensus::{ConsensusConfig, ConsensusState, PBFTEngine};
 use platform_core::{
-    ChainState, Challenge, ChallengeConfig, Hotkey, Keypair, NetworkConfig, NetworkMessage,
-    Proposal, ProposalAction, SignedNetworkMessage, Stake, SudoAction, ValidatorInfo, Vote,
+    ChainState, Challenge, ChallengeConfig, Keypair, NetworkConfig, NetworkMessage, Proposal,
+    ProposalAction, SignedNetworkMessage, Stake, ValidatorInfo, Vote,
 };
 use platform_storage::Storage;
 use std::sync::Arc;
@@ -49,8 +49,8 @@ async fn test_consensus_with_8_validators() {
     let proposal_id = consensus_state.start_round(proposal.clone());
 
     // Add 3 approve votes (not enough for 50% threshold = 4)
-    for i in 0..3 {
-        let vote = Vote::approve(proposal_id, validators[i].hotkey());
+    for (i, validator) in validators.iter().enumerate().take(3) {
+        let vote = Vote::approve(proposal_id, validator.hotkey());
         let result = consensus_state.add_vote(vote);
         assert!(
             result.is_none(),

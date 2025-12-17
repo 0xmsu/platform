@@ -228,7 +228,7 @@ impl EpochSync {
         let epoch_end = epoch_start + self.config.tempo;
 
         let (phase_start, phase_end) = self.get_phase_bounds(state.current_phase);
-        let blocks_remaining = (phase_end - block_in_epoch).max(0);
+        let blocks_remaining = phase_end - block_in_epoch;
 
         EpochInfo {
             epoch: state.current_epoch,

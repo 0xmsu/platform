@@ -1362,7 +1362,7 @@ async fn main() -> Result<()> {
                 }
 
                 // Periodic maintenance (every 10 simulated blocks or 10 seconds)
-                if block_counter % 10 == 0 || use_bittensor_blocks {
+                if block_counter.is_multiple_of(10) || use_bittensor_blocks {
                     if let Err(e) = consensus.check_timeouts().await {
                         error!("Timeout check error: {}", e);
                     }
@@ -1847,11 +1847,7 @@ async fn handle_message(
 
                 // Create stored evaluation from P2P message
                 let stored_eval = StoredEvaluation {
-                    id: format!(
-                        "{}_{}",
-                        result.job_id,
-                        result.validator.to_hex()[..16].to_string()
-                    ),
+                    id: format!("{}_{}", result.job_id, &result.validator.to_hex()[..16]),
                     agent_hash: result.agent_hash.clone(),
                     challenge_id: result.challenge_id.to_string(),
                     validator: result.validator.to_hex(),

@@ -774,7 +774,7 @@ mod tests {
 
         protection.update_config(new_config.clone());
         let retrieved = protection.config();
-        assert_eq!(retrieved.rate_limiting, false);
+        assert!(!retrieved.rate_limiting);
         assert_eq!(retrieved.rate_limit, 200);
     }
 

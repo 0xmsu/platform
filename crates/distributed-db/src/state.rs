@@ -35,6 +35,7 @@ struct AppliedTx {
 
 /// Undo operation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum UndoOp {
     Put {
         collection: String,

@@ -108,6 +108,7 @@ pub struct StorageEntry {
 
 impl StorageEntry {
     /// Create a new entry
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         entry_type: EntryType,
         key: String,
@@ -203,6 +204,7 @@ pub struct WriteRequest {
 
 impl WriteRequest {
     /// Create a new write request
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         challenge_id: String,
         entry_type: EntryType,
@@ -243,7 +245,7 @@ impl WriteRequest {
     pub fn compute_sign_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(self.challenge_id.as_bytes());
-        hasher.update(&[self.entry_type as u8]);
+        hasher.update([self.entry_type as u8]);
         hasher.update(self.key.as_bytes());
         hasher.update(&self.value);
         hasher.update(self.validator.as_bytes());
@@ -395,13 +397,8 @@ impl ChallengePartition {
         }
 
         // Entry type specific validation
-        match request.entry_type {
-            EntryType::Log => {
-                if request.value.len() > MAX_LOG_SIZE {
-                    return WriteValidation::reject_too_large(request.value.len(), MAX_LOG_SIZE);
-                }
-            }
-            _ => {}
+        if request.entry_type == EntryType::Log && request.value.len() > MAX_LOG_SIZE {
+            return WriteValidation::reject_too_large(request.value.len(), MAX_LOG_SIZE);
         }
 
         WriteValidation::Accept
@@ -409,7 +406,7 @@ impl ChallengePartition {
 
     /// Apply a write request (after validation)
     pub fn apply_write(&mut self, request: WriteRequest) -> Option<StorageEntry> {
-        let ttl = request.ttl_blocks.or_else(|| {
+        let ttl = request.ttl_blocks.or({
             match request.entry_type {
                 EntryType::Submission => Some(TEMP_DATA_TTL_BLOCKS),
                 EntryType::Log => Some(LOG_TTL_BLOCKS),

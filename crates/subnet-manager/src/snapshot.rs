@@ -313,7 +313,7 @@ impl SnapshotManager {
     }
 
     /// Serialize a directory to bytes (simplified)
-    fn serialize_directory(path: &PathBuf, output: &mut Vec<u8>) -> anyhow::Result<()> {
+    fn serialize_directory(path: &std::path::Path, output: &mut Vec<u8>) -> anyhow::Result<()> {
         // For now, just store the path - in production, would tar the directory
         let path_str = path.to_string_lossy();
         output.extend_from_slice(path_str.as_bytes());

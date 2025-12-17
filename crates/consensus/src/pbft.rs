@@ -275,8 +275,8 @@ impl PBFTEngine {
                     min_version: min_version.clone(),
                     recommended_version: recommended_version.clone(),
                     docker_image: docker_image.clone(),
-                    mandatory: mandatory.clone(),
-                    deadline_block: deadline_block.clone(),
+                    mandatory,
+                    deadline_block,
                 });
                 info!(
                     "Required version set: {} (mandatory: {})",

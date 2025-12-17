@@ -670,12 +670,12 @@ impl ChallengeRuntime {
     ) -> Result<EvaluationResult, RuntimeError> {
         let ctx = manager
             .get_context(&job.challenge_id)
-            .ok_or_else(|| RuntimeError::ChallengeNotFound(job.challenge_id))?
+            .ok_or(RuntimeError::ChallengeNotFound(job.challenge_id))?
             .with_job_id(job.id);
 
         let challenge = manager
             .get_challenge(&job.challenge_id)
-            .ok_or_else(|| RuntimeError::ChallengeNotFound(job.challenge_id))?;
+            .ok_or(RuntimeError::ChallengeNotFound(job.challenge_id))?;
 
         let start = std::time::Instant::now();
 

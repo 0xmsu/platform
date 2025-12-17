@@ -108,7 +108,7 @@ pub struct BestAgent {
 }
 
 /// Statistics from calculation
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct CalculationStats {
     pub total_submissions: u32,
     pub valid_submissions: u32,
@@ -116,19 +116,6 @@ pub struct CalculationStats {
     pub excluded_low_confidence: u32,
     pub outlier_validators: u32,
     pub total_evaluations: u32,
-}
-
-impl Default for CalculationStats {
-    fn default() -> Self {
-        Self {
-            total_submissions: 0,
-            valid_submissions: 0,
-            excluded_banned: 0,
-            excluded_low_confidence: 0,
-            outlier_validators: 0,
-            total_evaluations: 0,
-        }
-    }
 }
 
 /// Configuration for weight calculation (challenge can customize)

@@ -3,7 +3,7 @@
 //! These tests verify the complete system works together.
 
 use platform_challenge_runtime::{ChallengeRuntime, RuntimeConfig, RuntimeEvent};
-use platform_challenge_sdk::{Challenge, EvaluationJob, SimpleTestChallenge, WeightAssignment};
+use platform_challenge_sdk::{Challenge, EvaluationJob, SimpleTestChallenge};
 use platform_core::{ChainState, Keypair, NetworkConfig, Stake, ValidatorInfo};
 use platform_epoch::{EpochConfig, EpochPhase, EpochTransition};
 use std::sync::Arc;

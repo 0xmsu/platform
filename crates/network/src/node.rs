@@ -105,7 +105,7 @@ impl NetworkNode {
         // Use provided seed for deterministic peer ID, or generate random
         let local_key = if let Some(seed) = config.identity_seed {
             // Derive libp2p Ed25519 keypair from seed
-            let secret = libp2p::identity::ed25519::SecretKey::try_from_bytes(seed.clone())
+            let secret = libp2p::identity::ed25519::SecretKey::try_from_bytes(seed)
                 .map_err(|e| anyhow::anyhow!("Invalid identity seed: {}", e))?;
             let ed25519_keypair = libp2p::identity::ed25519::Keypair::from(secret);
             Keypair::from(ed25519_keypair)

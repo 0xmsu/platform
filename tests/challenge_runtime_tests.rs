@@ -2,7 +2,6 @@
 //!
 //! Tests for challenge execution, scheduling, and anti-cheat.
 
-use platform_challenge_runtime::*;
 use platform_challenge_sdk::*;
 use platform_core::*;
 use std::collections::HashMap;
@@ -122,7 +121,7 @@ mod anti_cheat {
         let minimum_top_validators = validator_count / 2; // 50%
 
         // Miner needs to be in top position on at least 5 validators
-        let top_positions = vec![
+        let top_positions = [
             true, true, true, true, true, false, false, false, false, false,
         ];
         let top_count = top_positions.iter().filter(|&&x| x).count();
@@ -147,7 +146,7 @@ mod scheduler {
 
     #[test]
     fn test_job_priority() {
-        let priorities = vec![JobPriority::High, JobPriority::Normal, JobPriority::Low];
+        let priorities = [JobPriority::High, JobPriority::Normal, JobPriority::Low];
 
         assert!(JobPriority::High > JobPriority::Normal);
         assert!(JobPriority::Normal > JobPriority::Low);
@@ -437,7 +436,7 @@ mod weight_calculator {
 
     #[test]
     fn test_weight_normalization() {
-        let weights = vec![
+        let weights = [
             ("m1".to_string(), 0.8),
             ("m2".to_string(), 0.5),
             ("m3".to_string(), 0.3),
@@ -659,11 +658,11 @@ impl DuplicateTracker {
         timestamp: chrono::DateTime<chrono::Utc>,
     ) -> bool {
         let mut hashes = self.hashes.write();
-        if hashes.contains_key(&hash) {
-            false
-        } else {
-            hashes.insert(hash, (miner.clone(), timestamp));
+        if let std::collections::hash_map::Entry::Vacant(e) = hashes.entry(hash) {
+            e.insert((miner.clone(), timestamp));
             true
+        } else {
+            false
         }
     }
 }

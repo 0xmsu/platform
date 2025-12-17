@@ -330,7 +330,7 @@ impl WriteRequest {
     /// Compute what should be signed: SHA256(content_hash || hotkey || epoch)
     pub fn compute_sign_payload(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(&self.content_hash);
+        hasher.update(self.content_hash);
         hasher.update(self.submitter_hotkey.as_bytes());
         hasher.update(self.epoch.to_le_bytes());
         hasher.finalize().into()
@@ -544,10 +544,8 @@ pub trait SchemaValidator: Send + Sync {
         }
 
         // 4. Verify signature (anti-relay attack)
-        if class.validation.require_signature {
-            if !self.verify_signature(request) {
-                return ValidationResult::invalid(ValidationError::signature_invalid());
-            }
+        if class.validation.require_signature && !self.verify_signature(request) {
+            return ValidationResult::invalid(ValidationError::signature_invalid());
         }
 
         // 5. Check rate limit

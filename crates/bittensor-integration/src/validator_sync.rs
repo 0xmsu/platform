@@ -125,9 +125,9 @@ impl ValidatorSync {
             }
 
             // Extract normalized scores (u16 -> f64, divide by u16::MAX)
-            let incentive = neuron.incentive as f64 / u16::MAX as f64;
-            let trust = neuron.trust as f64 / u16::MAX as f64;
-            let consensus = neuron.consensus as f64 / u16::MAX as f64;
+            let incentive = neuron.incentive / u16::MAX as f64;
+            let trust = neuron.trust / u16::MAX as f64;
+            let consensus = neuron.consensus / u16::MAX as f64;
 
             // Check if active (has stake)
             let active = stake > 0;

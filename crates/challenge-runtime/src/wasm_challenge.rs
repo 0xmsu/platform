@@ -258,7 +258,7 @@ impl<H: HostFunctions> TerminalBenchWasm<H> {
             task_scores,
             total_cost_usd: total_cost,
             timestamp: chrono::Utc::now().timestamp_millis() as u64,
-            result_hash: self.compute_result_hash(&agent_hash, final_score),
+            result_hash: self.compute_result_hash(agent_hash, final_score),
         };
 
         // Store result
@@ -644,7 +644,7 @@ mod tests {
             HostResult::ok(Some(MinerInfo {
                 hotkey: "test".to_string(),
                 coldkey: "cold".to_string(),
-                stake: 1000_000_000_000,
+                stake: 1_000_000_000_000,
                 is_registered: true,
                 uid: Some(1),
             }))
@@ -654,7 +654,7 @@ mod tests {
             true
         }
         fn get_miner_stake(&self, _hotkey: &str) -> u64 {
-            1000_000_000_000
+            1_000_000_000_000
         }
 
         async fn submit_weights(&self, _submission: WeightSubmission) -> HostResult<()> {

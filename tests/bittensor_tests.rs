@@ -9,7 +9,6 @@ use platform_core::*;
 // ============================================================================
 
 mod config {
-    use super::*;
 
     struct SubtensorConfig {
         endpoint: String,
@@ -73,7 +72,6 @@ mod config {
 // ============================================================================
 
 mod weight_types {
-    use super::*;
 
     struct WeightAssignment {
         uid: u16,
@@ -95,7 +93,7 @@ mod weight_types {
 
     #[test]
     fn test_weight_normalization() {
-        let weights = vec![
+        let weights = [
             WeightAssignment {
                 uid: 0,
                 hotkey: "a".to_string(),
@@ -151,7 +149,6 @@ mod weight_types {
 // ============================================================================
 
 mod block_sync {
-    use super::*;
 
     struct BlockInfo {
         number: u64,
@@ -368,7 +365,6 @@ mod commit_reveal {
 // ============================================================================
 
 mod mechanism_weights {
-    use super::*;
 
     struct MechanismWeightEntry {
         mechanism_id: u16,
@@ -388,7 +384,7 @@ mod mechanism_weights {
 
     #[test]
     fn test_mechanism_weights_sum() {
-        let weights = vec![
+        let weights = [
             MechanismWeightEntry {
                 mechanism_id: 0,
                 weight: 0.3,
@@ -413,7 +409,6 @@ mod mechanism_weights {
 // ============================================================================
 
 mod errors {
-    use super::*;
 
     #[derive(Debug)]
     enum SubtensorError {
@@ -479,7 +474,6 @@ mod errors {
 // ============================================================================
 
 mod integration {
-    use super::*;
 
     struct WeightAssignment {
         uid: u16,
@@ -489,7 +483,7 @@ mod integration {
 
     #[test]
     fn test_weight_submission_flow() {
-        let weights = vec![
+        let weights = [
             WeightAssignment {
                 uid: 0,
                 hotkey: "a".to_string(),

@@ -223,11 +223,11 @@ impl RocksStorage {
         let key = tx.id();
         let value = bincode::serialize(&(tx, receipt, block))?;
 
-        self.db.put_cf(&cf, &key, &value)?;
+        self.db.put_cf(&cf, key, &value)?;
 
         // Also index by block
-        let block_key = format!("block:{}:{}", block, hex::encode(&key));
-        self.db.put_cf(&cf, block_key.as_bytes(), &key)?;
+        let block_key = format!("block:{}:{}", block, hex::encode(key));
+        self.db.put_cf(&cf, block_key.as_bytes(), key)?;
 
         Ok(())
     }

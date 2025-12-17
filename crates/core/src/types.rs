@@ -460,8 +460,8 @@ mod tests {
         let id2 = ChallengeId::new();
 
         let mut map: HashMap<ChallengeId, i32> = HashMap::new();
-        map.insert(id1.clone(), 1);
-        map.insert(id2.clone(), 2);
+        map.insert(id1, 1);
+        map.insert(id2, 2);
 
         assert_eq!(map.get(&id1), Some(&1));
         assert_eq!(map.get(&id2), Some(&2));

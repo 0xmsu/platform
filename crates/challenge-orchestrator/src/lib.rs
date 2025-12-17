@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Main orchestrator managing all challenge containers
+#[allow(dead_code)]
 pub struct ChallengeOrchestrator {
     docker: DockerClient,
     challenges: Arc<RwLock<HashMap<ChallengeId, ChallengeInstance>>>,

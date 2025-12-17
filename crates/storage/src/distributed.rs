@@ -350,10 +350,10 @@ pub struct WriteOp {
 impl WriteOp {
     pub fn new(entry: StoredEntry, initiator: &str, block: u64) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(&entry.header.challenge_id.as_bytes());
-        hasher.update(&entry.header.key.as_bytes());
-        hasher.update(&entry.header.value_hash);
-        hasher.update(&block.to_le_bytes());
+        hasher.update(entry.header.challenge_id.as_bytes());
+        hasher.update(entry.header.key.as_bytes());
+        hasher.update(entry.header.value_hash);
+        hasher.update(block.to_le_bytes());
         let op_id: [u8; 32] = hasher.finalize().into();
 
         let mut votes_yes = HashSet::new();
@@ -539,9 +539,7 @@ impl DistributedStorage {
 
         // Check if consensus already reached with self-vote
         if let Some(true) = op.check_consensus(total) {
-            if let Err(e) = self.commit_write(op.clone()) {
-                return Err(e);
-            }
+            self.commit_write(op.clone())?;
             self.stats.write().write_ops_committed += 1;
             return Ok(op);
         }
@@ -620,9 +618,7 @@ impl DistributedStorage {
         // Check if consensus already reached with self-vote
         if let Some(true) = op.check_consensus(total) {
             // Auto-commit
-            if let Err(e) = self.commit_write(op.clone()) {
-                return Err(e);
-            }
+            self.commit_write(op.clone())?;
             self.stats.write().write_ops_committed += 1;
             return Ok(op);
         }

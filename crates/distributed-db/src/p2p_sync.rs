@@ -201,8 +201,8 @@ impl DBSyncManager {
 
         // Create signature over state data
         let mut hasher = Sha256::new();
-        hasher.update(&state_root);
-        hasher.update(&block_number.to_le_bytes());
+        hasher.update(state_root);
+        hasher.update(block_number.to_le_bytes());
         let hash = hasher.finalize();
 
         let signed = self.keypair.sign(&hash);
@@ -244,8 +244,8 @@ impl DBSyncManager {
             } => {
                 // Verify signature
                 let mut hasher = Sha256::new();
-                hasher.update(&state_root);
-                hasher.update(&block_number.to_le_bytes());
+                hasher.update(state_root);
+                hasher.update(block_number.to_le_bytes());
                 let hash = hasher.finalize();
 
                 let hotkey_obj =
@@ -477,7 +477,6 @@ impl ConsensusStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
 
     #[test]
     fn test_peer_sync_status() {

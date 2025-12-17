@@ -399,13 +399,8 @@ fn handle_single_request(body: Value, handler: &RpcHandler) -> (StatusCode, Json
     // Handle the request
     let response = handler.handle(req);
 
-    let status = if response.error.is_some() {
-        StatusCode::OK // JSON-RPC errors still return 200
-    } else {
-        StatusCode::OK
-    };
-
-    (status, Json(response))
+    // JSON-RPC always returns 200 OK (errors are in the response body)
+    (StatusCode::OK, Json(response))
 }
 
 /// Handler for webhook progress callbacks from challenge containers

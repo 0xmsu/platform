@@ -246,9 +246,9 @@ impl CommitRevealManager {
         let mut states = self.states.write();
         let key = (epoch, challenge_id);
 
-        if !states.contains_key(&key) {
-            states.insert(key, CommitRevealState::new(epoch, challenge_id));
-        }
+        states
+            .entry(key)
+            .or_insert_with(|| CommitRevealState::new(epoch, challenge_id));
 
         states
     }

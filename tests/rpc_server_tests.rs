@@ -82,7 +82,6 @@ fn test_active_validators_count() {
 // ============================================================================
 
 mod response_types {
-    use super::*;
 
     struct HealthResponse {
         status: String,

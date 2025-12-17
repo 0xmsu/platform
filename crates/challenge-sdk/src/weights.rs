@@ -145,7 +145,7 @@ fn calculate_median(values: &mut [f64]) -> f64 {
 
     let mid = values.len() / 2;
 
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[mid - 1] + values[mid]) / 2.0
     } else {
         values[mid]
@@ -268,6 +268,7 @@ pub fn compute_subtensor_hash(
 }
 
 /// Verify a subtensor commitment matches the provided data.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_subtensor_commitment(
     commitment: &str,
     account: &[u8; 32],
@@ -365,10 +366,8 @@ pub fn detect_malicious_weights(
         // Check each validator
         for (validator, weight) in &weights_by_validator {
             let deviation = (weight - median).abs();
-            if deviation > threshold {
-                if !suspicious.contains(validator) {
-                    suspicious.push(validator.clone());
-                }
+            if deviation > threshold && !suspicious.contains(validator) {
+                suspicious.push(validator.clone());
             }
         }
     }
@@ -480,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_median() {
-        assert_eq!(calculate_median(&mut vec![1.0, 3.0, 2.0]), 2.0);
-        assert_eq!(calculate_median(&mut vec![1.0, 2.0, 3.0, 4.0]), 2.5);
+        assert_eq!(calculate_median(&mut [1.0, 3.0, 2.0]), 2.0);
+        assert_eq!(calculate_median(&mut [1.0, 2.0, 3.0, 4.0]), 2.5);
     }
 }

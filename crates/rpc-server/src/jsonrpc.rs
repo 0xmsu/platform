@@ -398,7 +398,7 @@ impl RpcHandler {
                 "isSyncing": false,
                 "peers": peers_count,
                 "shouldHavePeers": true,
-                "health": if peers_count > 0 || chain.validators.len() > 0 { "healthy" } else { "degraded" }
+                "health": if peers_count > 0 || !chain.validators.is_empty() { "healthy" } else { "degraded" }
             }),
         )
     }

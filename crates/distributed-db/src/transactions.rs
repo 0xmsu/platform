@@ -67,9 +67,9 @@ impl Transaction {
     fn compute_id(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(self.sender.as_bytes());
-        hasher.update(&bincode::serialize(&self.operation).unwrap_or_default());
-        hasher.update(&self.timestamp.to_le_bytes());
-        hasher.update(&self.nonce.to_le_bytes());
+        hasher.update(bincode::serialize(&self.operation).unwrap_or_default());
+        hasher.update(self.timestamp.to_le_bytes());
+        hasher.update(self.nonce.to_le_bytes());
         hasher.finalize().into()
     }
 
