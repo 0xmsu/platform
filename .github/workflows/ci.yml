@@ -9,6 +9,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -18,6 +19,12 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -25,18 +32,18 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-build-
+          cache-on-failure: true
 
       - name: Build
-        run: cargo build --release --verbose
+        run: cargo build --release
+
+      - name: Cleanup before cache
+        run: |
+          rm -rf target/release/.fingerprint target/release/build target/release/deps target/release/examples target/release/incremental
+          find target -name "*.d" -delete
+          df -h
 
   test:
     name: Test
@@ -44,6 +51,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -56,15 +68,10 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-
+          cache-on-failure: true
+          save-if: false
 
       - name: Run tests with coverage
         run: cargo llvm-cov --workspace --json --output-path coverage.json
@@ -94,6 +101,11 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -103,15 +115,10 @@ jobs:
           components: clippy
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-clippy-
+          cache-on-failure: true
+          save-if: false
 
       - name: Run clippy
         run: cargo clippy --all-targets --workspace -- -W clippy::all
@@ -124,11 +131,13 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -173,11 +182,21 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
 
       - name: Build release binaries
         run: cargo build --release
