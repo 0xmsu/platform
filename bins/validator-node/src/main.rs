@@ -29,8 +29,42 @@ use platform_subnet_manager::BanList;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+// ==================== Container Authentication ====================
+
+/// Session with a challenge container
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct ContainerAuthSession {
+    /// The authentication token
+    token: String,
+    /// When the session expires
+    expires_at: u64,
+    /// Challenge container name (for logging)
+    container_name: String,
+}
+
+/// Request body for authenticating with a challenge container
+#[derive(Debug, Clone, serde::Serialize)]
+struct ContainerAuthRequest {
+    hotkey: String,
+    challenge_id: String,
+    timestamp: u64,
+    nonce: String,
+    signature: String,
+}
+
+/// Response from challenge container authentication
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ContainerAuthResponse {
+    success: bool,
+    session_token: Option<String>,
+    expires_at: Option<u64>,
+    error: Option<String>,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "validator-node")]
@@ -338,6 +372,10 @@ async fn main() -> Result<()> {
     // Store challenge endpoints for HTTP proxying (challenge_id -> endpoint URL)
     let challenge_endpoints: Arc<RwLock<std::collections::HashMap<String, String>>> =
         Arc::new(RwLock::new(std::collections::HashMap::new()));
+
+    // Store authenticated sessions with challenge containers
+    let container_auth_sessions: Arc<RwLock<HashMap<String, ContainerAuthSession>>> =
+        Arc::new(RwLock::new(HashMap::new()));
 
     // Start RPC server (if enabled)
     // Challenge-specific logic is handled by Docker containers
@@ -1194,6 +1232,9 @@ async fn main() -> Result<()> {
     info!("Validator node running. Press Ctrl+C to stop.");
 
     let chain_state_clone = chain_state.clone();
+    // Clone keypair and auth sessions for P2P message handling
+    let keypair_for_p2p = Some(keypair.clone());
+    let auth_sessions_for_p2p = Some(container_auth_sessions.clone());
     // Get challenge_routes Arc for auto-registration when receiving via P2P
     let challenge_routes_for_p2p = rpc_handler.as_ref().map(|h| h.challenge_routes.clone());
     // Get distributed_db for P2P message handling
@@ -1568,7 +1609,7 @@ async fn main() -> Result<()> {
 
                                 if has_sufficient_stake {
                                     // Forward all messages to consensus handler
-                                    handle_message(&consensus, signed, &chain_state_clone, challenge_orchestrator.as_ref(), challenge_routes_for_p2p.as_ref(), db_for_p2p.as_ref()).await;
+                                    handle_message(&consensus, signed, &chain_state_clone, challenge_orchestrator.as_ref(), challenge_routes_for_p2p.as_ref(), db_for_p2p.as_ref(), keypair_for_p2p.as_ref(), auth_sessions_for_p2p.as_ref()).await;
                                 } else {
                                     // Allow Sudo to bypass stake check for bootstrapping and upgrades
                                     let is_sudo = {
@@ -1578,7 +1619,7 @@ async fn main() -> Result<()> {
 
                                     if is_sudo {
                                         info!("Bypassing stake check for Sudo message from {}", &signer_hex[..16]);
-                                        handle_message(&consensus, signed, &chain_state_clone, challenge_orchestrator.as_ref(), challenge_routes_for_p2p.as_ref(), db_for_p2p.as_ref()).await;
+                                        handle_message(&consensus, signed, &chain_state_clone, challenge_orchestrator.as_ref(), challenge_routes_for_p2p.as_ref(), db_for_p2p.as_ref(), keypair_for_p2p.as_ref(), auth_sessions_for_p2p.as_ref()).await;
                                     } else {
                                         warn!(
                                             "Rejected message from {} - insufficient stake (min {} TAO required)",
@@ -1878,6 +1919,8 @@ async fn handle_message(
         &Arc<RwLock<HashMap<String, Vec<platform_challenge_sdk::ChallengeRoute>>>>,
     >,
     distributed_db: Option<&Arc<distributed_db::DistributedDB>>,
+    keypair: Option<&Keypair>,
+    container_auth_sessions: Option<&Arc<RwLock<HashMap<String, ContainerAuthSession>>>>,
 ) {
     let signer = msg.signer().clone();
 
@@ -2073,14 +2116,36 @@ async fn handle_message(
             );
 
             // Forward challenge message to the appropriate container via HTTP
+            // Need keypair for authentication
+            if keypair.is_none() || container_auth_sessions.is_none() {
+                debug!("Skipping challenge message forward - no auth context available");
+                return;
+            }
+
             let challenge_id = challenge_msg.challenge_id.clone();
             let container_name = challenge_id.to_lowercase().replace([' ', '_'], "-");
             let from_hotkey = signer.to_hex();
             let msg_payload = challenge_msg.payload.clone();
+            let kp = keypair.unwrap().clone();
+            let sessions = container_auth_sessions.unwrap().clone();
 
             tokio::spawn(async move {
                 let client = reqwest::Client::new();
-                let p2p_endpoint = format!("http://challenge-{}:8080/p2p/message", container_name);
+                let base_url = format!("http://challenge-{}:8080", container_name);
+                let p2p_endpoint = format!("{}/p2p/message", base_url);
+
+                // Get or create authentication token
+                let auth_token =
+                    match get_container_auth(&sessions, &base_url, &challenge_id, &kp).await {
+                        Ok(token) => token,
+                        Err(e) => {
+                            warn!(
+                                "Failed to authenticate with container {}: {}",
+                                container_name, e
+                            );
+                            return;
+                        }
+                    };
 
                 // Convert ChallengeMessageType to ChallengeP2PMessage for the container
                 let p2p_message = match challenge_msg.message_type {
@@ -2126,12 +2191,23 @@ async fn handle_message(
                         "message": message
                     });
 
-                    match client.post(&p2p_endpoint).json(&req_body).send().await {
+                    match client
+                        .post(&p2p_endpoint)
+                        .header("X-Auth-Token", &auth_token)
+                        .json(&req_body)
+                        .send()
+                        .await
+                    {
                         Ok(resp) if resp.status().is_success() => {
                             debug!(
-                                "Forwarded challenge message to container {}",
+                                "Forwarded challenge message to container {} (authenticated)",
                                 container_name
                             );
+                        }
+                        Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                            // Token expired, remove from cache
+                            sessions.write().remove(&challenge_id);
+                            warn!("Auth token expired for container {}, will re-authenticate on next message", container_name);
                         }
                         Ok(resp) => {
                             debug!("Container {} returned {}", container_name, resp.status());
@@ -2479,4 +2555,129 @@ async fn discover_routes(url: &str) -> anyhow::Result<RoutesManifestResponse> {
 
     let manifest: RoutesManifestResponse = response.json().await?;
     Ok(manifest)
+}
+
+/// Authenticate with a challenge container
+/// Returns the session token on success
+async fn authenticate_with_container(
+    base_url: &str,
+    challenge_id: &str,
+    keypair: &Keypair,
+) -> anyhow::Result<ContainerAuthSession> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Generate random nonce
+    let nonce: [u8; 32] = rand::random();
+    let nonce_hex = hex::encode(nonce);
+
+    // Create message to sign: "auth:{challenge_id}:{timestamp}:{nonce}"
+    let message = format!("auth:{}:{}:{}", challenge_id, timestamp, nonce_hex);
+
+    // Sign the message
+    let signed = keypair.sign(message.as_bytes());
+    let signature_hex = hex::encode(&signed.signature);
+
+    let auth_request = ContainerAuthRequest {
+        hotkey: keypair.hotkey().to_hex(),
+        challenge_id: challenge_id.to_string(),
+        timestamp,
+        nonce: nonce_hex,
+        signature: signature_hex,
+    };
+
+    let auth_url = format!("{}/auth", base_url.trim_end_matches('/'));
+
+    info!(
+        "Authenticating with container at {} for challenge {}",
+        auth_url, challenge_id
+    );
+
+    let response = client.post(&auth_url).json(&auth_request).send().await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "Container authentication failed with status {}: {}",
+            status,
+            body
+        );
+    }
+
+    let auth_response: ContainerAuthResponse = response.json().await?;
+
+    if !auth_response.success {
+        anyhow::bail!(
+            "Container authentication rejected: {}",
+            auth_response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string())
+        );
+    }
+
+    let token = auth_response
+        .session_token
+        .ok_or_else(|| anyhow::anyhow!("No session token in auth response"))?;
+
+    let expires_at = auth_response.expires_at.unwrap_or(timestamp + 3600); // Default 1 hour
+
+    let container_name = challenge_id.to_lowercase().replace([' ', '_'], "-");
+
+    info!(
+        "Successfully authenticated with container {} (expires at {})",
+        container_name, expires_at
+    );
+
+    Ok(ContainerAuthSession {
+        token,
+        expires_at,
+        container_name,
+    })
+}
+
+/// Check if a session is still valid (not expired)
+fn is_session_valid(session: &ContainerAuthSession) -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Add 60 second buffer before expiry
+    now < session.expires_at.saturating_sub(60)
+}
+
+/// Get or refresh authentication session for a container
+async fn get_container_auth(
+    sessions: &RwLock<HashMap<String, ContainerAuthSession>>,
+    base_url: &str,
+    challenge_id: &str,
+    keypair: &Keypair,
+) -> anyhow::Result<String> {
+    // Check if we have a valid session
+    {
+        let sessions_read = sessions.read();
+        if let Some(session) = sessions_read.get(challenge_id) {
+            if is_session_valid(session) {
+                return Ok(session.token.clone());
+            }
+        }
+    }
+
+    // Need to authenticate or re-authenticate
+    let session = authenticate_with_container(base_url, challenge_id, keypair).await?;
+    let token = session.token.clone();
+
+    {
+        let mut sessions_write = sessions.write();
+        sessions_write.insert(challenge_id.to_string(), session);
+    }
+
+    Ok(token)
 }
