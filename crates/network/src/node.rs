@@ -92,6 +92,9 @@ pub struct NetworkNode {
     /// Connected peers
     peers: Arc<RwLock<HashSet<PeerId>>>,
 
+    /// Bootstrap peers to connect to
+    bootstrap_peers: Vec<Multiaddr>,
+
     /// Event sender
     event_tx: mpsc::Sender<NetworkEvent>,
 
@@ -139,6 +142,7 @@ impl NetworkNode {
             swarm,
             local_peer_id,
             peers: Arc::new(RwLock::new(HashSet::new())),
+            bootstrap_peers: config.bootstrap_peers.clone(),
             event_tx,
             event_rx: Some(event_rx),
         })
@@ -169,12 +173,36 @@ impl NetworkNode {
         info!("Listening on {:?}", config.listen_addr);
 
         // Connect to bootstrap peers
-        for addr in &config.bootstrap_peers {
-            info!("Dialing bootstrap peer: {}", addr);
-            self.swarm.dial(addr.clone())?;
-        }
+        self.dial_bootstrap_peers();
 
         Ok(())
+    }
+
+    /// Dial all bootstrap peers
+    pub fn dial_bootstrap_peers(&mut self) {
+        for addr in self.bootstrap_peers.clone() {
+            info!("Dialing bootstrap peer: {}", addr);
+            if let Err(e) = self.swarm.dial(addr.clone()) {
+                warn!("Failed to dial bootstrap peer {}: {}", addr, e);
+            }
+        }
+    }
+
+    /// Check if connected to any bootstrap peer
+    pub fn has_bootstrap_connection(&self) -> bool {
+        if self.bootstrap_peers.is_empty() {
+            return true; // No bootstrap peers configured
+        }
+        // Check if we have any peers connected
+        !self.peers.read().is_empty()
+    }
+
+    /// Retry connecting to bootstrap peers if not connected
+    pub fn retry_bootstrap_if_needed(&mut self) {
+        if !self.has_bootstrap_connection() {
+            info!("No peers connected, retrying bootstrap peers...");
+            self.dial_bootstrap_peers();
+        }
     }
 
     /// Broadcast a message via gossip
@@ -244,9 +272,55 @@ impl NetworkNode {
     }
 
     /// Run the event loop (should be spawned as a task)
+    /// Includes automatic retry of bootstrap peers every 30 seconds if not connected
     pub async fn run(&mut self) {
+        let mut bootstrap_retry_interval = tokio::time::interval(Duration::from_secs(30));
+        bootstrap_retry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
-            self.process_next_event().await;
+            tokio::select! {
+                event = self.swarm.select_next_some() => {
+                    self.handle_swarm_event(event).await;
+                }
+                _ = bootstrap_retry_interval.tick() => {
+                    self.retry_bootstrap_if_needed();
+                }
+            }
+        }
+    }
+
+    /// Handle a swarm event
+    async fn handle_swarm_event(&mut self, event: SwarmEvent<MiniChainBehaviourEvent>) {
+        match event {
+            SwarmEvent::Behaviour(event) => {
+                self.handle_behaviour_event(event).await;
+            }
+            SwarmEvent::NewListenAddr { address, .. } => {
+                info!("Listening on {}", address);
+            }
+            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                info!("Connected to peer: {}", peer_id);
+                self.peers.write().insert(peer_id);
+                let _ = self
+                    .event_tx
+                    .send(NetworkEvent::PeerConnected(peer_id))
+                    .await;
+            }
+            SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                info!("Disconnected from peer: {}", peer_id);
+                self.peers.write().remove(&peer_id);
+                let _ = self
+                    .event_tx
+                    .send(NetworkEvent::PeerDisconnected(peer_id))
+                    .await;
+            }
+            SwarmEvent::IncomingConnection { .. } => {}
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                if let Some(peer_id) = peer_id {
+                    warn!("Failed to connect to {}: {}", peer_id, error);
+                }
+            }
+            _ => {}
         }
     }
 
