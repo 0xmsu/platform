@@ -133,7 +133,7 @@ pub struct ValidatorInfo {
     pub last_seen: chrono::DateTime<chrono::Utc>,
     pub peer_id: Option<String>,
     /// X25519 public key for API key encryption (hex, 32 bytes)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub x25519_pubkey: Option<String>,
 }
 

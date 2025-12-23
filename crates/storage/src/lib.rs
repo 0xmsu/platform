@@ -323,9 +323,7 @@ mod lib_tests {
         assert_eq!(loaded.unwrap().name, challenge.name);
     }
 
-    // TODO: Fix bincode serialization issue with ValidatorInfo struct changes
     #[test]
-    #[ignore = "Bincode serialization issue with ValidatorInfo struct changes"]
     fn test_validator_persistence() {
         let dir = tempdir().unwrap();
         let storage = Storage::open(dir.path()).unwrap();

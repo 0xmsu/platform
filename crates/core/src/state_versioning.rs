@@ -27,7 +27,10 @@ use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 
 /// Current state version - increment when ChainState structure changes
-pub const CURRENT_STATE_VERSION: u32 = 2;
+/// V1: Original format (no registered_hotkeys)
+/// V2: Added registered_hotkeys
+/// V3: Added x25519_pubkey to ValidatorInfo
+pub const CURRENT_STATE_VERSION: u32 = 3;
 
 /// Minimum supported version for migration
 pub const MIN_SUPPORTED_VERSION: u32 = 1;
@@ -78,6 +81,35 @@ impl VersionedState {
 }
 
 // ============================================================================
+// ValidatorInfo versions (for backward compatibility)
+// ============================================================================
+
+/// ValidatorInfo V1/V2 - without x25519_pubkey field
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ValidatorInfoLegacy {
+    pub hotkey: Hotkey,
+    pub stake: Stake,
+    pub is_active: bool,
+    pub last_seen: chrono::DateTime<chrono::Utc>,
+    pub peer_id: Option<String>,
+    // V1/V2 did NOT have x25519_pubkey
+}
+
+impl ValidatorInfoLegacy {
+    /// Migrate to current ValidatorInfo
+    pub fn migrate(self) -> ValidatorInfo {
+        ValidatorInfo {
+            hotkey: self.hotkey,
+            stake: self.stake,
+            is_active: self.is_active,
+            last_seen: self.last_seen,
+            peer_id: self.peer_id,
+            x25519_pubkey: None, // New field in V3
+        }
+    }
+}
+
+// ============================================================================
 // Version 1 State (original format, before registered_hotkeys)
 // ============================================================================
 
@@ -88,7 +120,7 @@ pub struct ChainStateV1 {
     pub epoch: u64,
     pub config: NetworkConfig,
     pub sudo_key: Hotkey,
-    pub validators: HashMap<Hotkey, ValidatorInfo>,
+    pub validators: HashMap<Hotkey, ValidatorInfoLegacy>,
     pub challenges: HashMap<ChallengeId, Challenge>,
     pub challenge_configs: HashMap<ChallengeId, ChallengeContainerConfig>,
     pub mechanism_configs: HashMap<u8, MechanismWeightConfig>,
@@ -108,7 +140,11 @@ impl ChainStateV1 {
             epoch: self.epoch,
             config: self.config,
             sudo_key: self.sudo_key,
-            validators: self.validators,
+            validators: self
+                .validators
+                .into_iter()
+                .map(|(k, v)| (k, v.migrate()))
+                .collect(),
             challenges: self.challenges,
             challenge_configs: self.challenge_configs,
             mechanism_configs: self.mechanism_configs,
@@ -117,8 +153,56 @@ impl ChainStateV1 {
             pending_jobs: self.pending_jobs,
             state_hash: self.state_hash,
             last_updated: self.last_updated,
-            // New field in V2 - initialize empty, will be populated from metagraph
-            registered_hotkeys: HashSet::new(),
+            registered_hotkeys: HashSet::new(), // New in V2
+        }
+    }
+}
+
+// ============================================================================
+// Version 2 State (added registered_hotkeys, but ValidatorInfo without x25519_pubkey)
+// ============================================================================
+
+/// ChainState V2 - added registered_hotkeys, ValidatorInfo without x25519_pubkey
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChainStateV2 {
+    pub block_height: BlockHeight,
+    pub epoch: u64,
+    pub config: NetworkConfig,
+    pub sudo_key: Hotkey,
+    pub validators: HashMap<Hotkey, ValidatorInfoLegacy>,
+    pub challenges: HashMap<ChallengeId, Challenge>,
+    pub challenge_configs: HashMap<ChallengeId, ChallengeContainerConfig>,
+    pub mechanism_configs: HashMap<u8, MechanismWeightConfig>,
+    pub challenge_weights: HashMap<ChallengeId, ChallengeWeightAllocation>,
+    pub required_version: Option<crate::RequiredVersion>,
+    pub pending_jobs: Vec<Job>,
+    pub state_hash: [u8; 32],
+    pub last_updated: chrono::DateTime<chrono::Utc>,
+    pub registered_hotkeys: HashSet<Hotkey>, // Added in V2
+}
+
+impl ChainStateV2 {
+    /// Migrate V2 to current ChainState
+    pub fn migrate(self) -> crate::ChainState {
+        crate::ChainState {
+            block_height: self.block_height,
+            epoch: self.epoch,
+            config: self.config,
+            sudo_key: self.sudo_key,
+            validators: self
+                .validators
+                .into_iter()
+                .map(|(k, v)| (k, v.migrate()))
+                .collect(),
+            challenges: self.challenges,
+            challenge_configs: self.challenge_configs,
+            mechanism_configs: self.mechanism_configs,
+            challenge_weights: self.challenge_weights,
+            required_version: self.required_version,
+            pending_jobs: self.pending_jobs,
+            state_hash: self.state_hash,
+            last_updated: self.last_updated,
+            registered_hotkeys: self.registered_hotkeys,
         }
     }
 }
@@ -131,16 +215,28 @@ impl ChainStateV1 {
 fn migrate_state(version: u32, data: &[u8]) -> Result<crate::ChainState> {
     match version {
         1 => {
-            // V1 -> V2: Add registered_hotkeys field
+            // V1 -> V3: Add registered_hotkeys and x25519_pubkey
             let v1: ChainStateV1 = bincode::deserialize(data).map_err(|e| {
                 crate::MiniChainError::Serialization(format!("V1 migration failed: {}", e))
             })?;
             info!(
-                "Migrated state V1->V2: block_height={}, validators={}",
+                "Migrated state V1->V3: block_height={}, validators={}",
                 v1.block_height,
                 v1.validators.len()
             );
             Ok(v1.migrate())
+        }
+        2 => {
+            // V2 -> V3: Add x25519_pubkey to ValidatorInfo
+            let v2: ChainStateV2 = bincode::deserialize(data).map_err(|e| {
+                crate::MiniChainError::Serialization(format!("V2 migration failed: {}", e))
+            })?;
+            info!(
+                "Migrated state V2->V3: block_height={}, validators={}",
+                v2.block_height,
+                v2.validators.len()
+            );
+            Ok(v2.migrate())
         }
         _ => Err(crate::MiniChainError::Serialization(format!(
             "Unknown state version: {}",
@@ -158,8 +254,9 @@ fn migrate_state(version: u32, data: &[u8]) -> Result<crate::ChainState> {
 /// This function tries multiple strategies to load state:
 /// 1. Try as VersionedState (new format with version header)
 /// 2. Try as current ChainState directly (for states saved without version)
-/// 3. Try as ChainStateV1 (legacy format)
-/// 4. Return error if all fail
+/// 3. Try as ChainStateV2 (legacy format with registered_hotkeys but no x25519_pubkey)
+/// 4. Try as ChainStateV1 (oldest format)
+/// 5. Return error if all fail
 pub fn deserialize_state_smart(data: &[u8]) -> Result<crate::ChainState> {
     // Strategy 1: Try as VersionedState (preferred format)
     if let Ok(versioned) = bincode::deserialize::<VersionedState>(data) {
@@ -172,7 +269,13 @@ pub fn deserialize_state_smart(data: &[u8]) -> Result<crate::ChainState> {
         return Ok(state);
     }
 
-    // Strategy 3: Try as V1 (legacy format without registered_hotkeys)
+    // Strategy 3: Try as V2 (with registered_hotkeys, without x25519_pubkey)
+    if let Ok(v2) = bincode::deserialize::<ChainStateV2>(data) {
+        warn!("Loaded legacy V2 state, migrating...");
+        return Ok(v2.migrate());
+    }
+
+    // Strategy 4: Try as V1 (oldest format without registered_hotkeys)
     if let Ok(v1) = bincode::deserialize::<ChainStateV1>(data) {
         warn!("Loaded legacy V1 state, migrating...");
         return Ok(v1.migrate());
@@ -216,6 +319,48 @@ mod tests {
 
         assert_eq!(original.block_height, loaded.block_height);
         assert_eq!(original.epoch, loaded.epoch);
+    }
+
+    #[test]
+    fn test_validator_info_roundtrip() {
+        let kp = Keypair::generate();
+        let info = ValidatorInfo::new(kp.hotkey(), Stake::new(10_000_000_000));
+
+        // Test bincode roundtrip of just ValidatorInfo
+        let data = bincode::serialize(&info).unwrap();
+        let loaded: ValidatorInfo = bincode::deserialize(&data).unwrap();
+
+        assert_eq!(info.hotkey, loaded.hotkey);
+        assert_eq!(info.stake, loaded.stake);
+        assert_eq!(info.x25519_pubkey, loaded.x25519_pubkey);
+    }
+
+    #[test]
+    fn test_versioned_roundtrip_with_validators() {
+        let mut state = create_test_state();
+
+        // Add some validators
+        for _ in 0..4 {
+            let kp = Keypair::generate();
+            let info = ValidatorInfo::new(kp.hotkey(), Stake::new(10_000_000_000));
+            state.add_validator(info).unwrap();
+        }
+
+        assert_eq!(state.validators.len(), 4);
+
+        // First test: direct bincode roundtrip (should work)
+        let direct_data = bincode::serialize(&state).unwrap();
+        let direct_loaded: crate::ChainState = bincode::deserialize(&direct_data).unwrap();
+        assert_eq!(state.validators.len(), direct_loaded.validators.len());
+
+        // Second test: versioned roundtrip
+        let data = serialize_state_versioned(&state).unwrap();
+
+        // Deserialize
+        let loaded = deserialize_state_smart(&data).unwrap();
+
+        assert_eq!(state.block_height, loaded.block_height);
+        assert_eq!(state.validators.len(), loaded.validators.len());
     }
 
     #[test]
@@ -288,6 +433,6 @@ mod tests {
     #[test]
     fn test_version_constants() {
         assert!(CURRENT_STATE_VERSION >= MIN_SUPPORTED_VERSION);
-        assert_eq!(CURRENT_STATE_VERSION, 2);
+        assert_eq!(CURRENT_STATE_VERSION, 3);
     }
 }

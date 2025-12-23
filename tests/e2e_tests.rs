@@ -133,9 +133,7 @@ async fn test_e2e_block_progression() {
 // E2E: STORAGE FLOW (using main Storage, not DistributedStorage)
 // ============================================================================
 
-// TODO: Fix bincode serialization issue with ValidatorInfo struct changes
 #[test]
-#[ignore = "Bincode serialization issue with ValidatorInfo struct changes"]
 fn test_e2e_storage_state_persistence() {
     let dir = tempdir().unwrap();
     let storage = Storage::open(dir.path()).unwrap();
@@ -316,9 +314,7 @@ fn test_e2e_state_hash_consistency() {
 // E2E: FULL VALIDATOR FLOW
 // ============================================================================
 
-// TODO: Fix bincode serialization issue with ValidatorInfo struct changes
 #[tokio::test]
-#[ignore = "Bincode serialization issue with ValidatorInfo struct changes"]
 async fn test_e2e_full_validator_flow() {
     let sudo = Keypair::generate();
     let dir = tempdir().unwrap();
