@@ -65,7 +65,7 @@ pub struct ValidatorResponse {
     pub peer_id: Option<String>,
     /// X25519 public key for API key encryption (hex, 32 bytes)
     /// Derived from validator's sr25519 seed
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x25519_pubkey: Option<String>,
 }
 
@@ -273,6 +273,7 @@ mod tests {
             is_active: true,
             last_seen: chrono::Utc::now(),
             peer_id: Some("peer1".to_string()),
+            x25519_pubkey: None,
         };
         let json = serde_json::to_string(&validator).unwrap();
         let parsed: ValidatorResponse = serde_json::from_str(&json).unwrap();

@@ -132,8 +132,9 @@ fn migrate_state(version: u32, data: &[u8]) -> Result<crate::ChainState> {
     match version {
         1 => {
             // V1 -> V2: Add registered_hotkeys field
-            let v1: ChainStateV1 = bincode::deserialize(data)
-                .map_err(|e| crate::MiniChainError::Serialization(format!("V1 migration failed: {}", e)))?;
+            let v1: ChainStateV1 = bincode::deserialize(data).map_err(|e| {
+                crate::MiniChainError::Serialization(format!("V1 migration failed: {}", e))
+            })?;
             info!(
                 "Migrated state V1->V2: block_height={}, validators={}",
                 v1.block_height,
@@ -186,8 +187,7 @@ pub fn deserialize_state_smart(data: &[u8]) -> Result<crate::ChainState> {
 /// Serialize state with version header
 pub fn serialize_state_versioned(state: &crate::ChainState) -> Result<Vec<u8>> {
     let versioned = VersionedState::from_state(state)?;
-    bincode::serialize(&versioned)
-        .map_err(|e| crate::MiniChainError::Serialization(e.to_string()))
+    bincode::serialize(&versioned).map_err(|e| crate::MiniChainError::Serialization(e.to_string()))
 }
 
 // ============================================================================
@@ -207,13 +207,13 @@ mod tests {
     #[test]
     fn test_versioned_roundtrip() {
         let original = create_test_state();
-        
+
         // Serialize with version
         let data = serialize_state_versioned(&original).unwrap();
-        
+
         // Deserialize
         let loaded = deserialize_state_smart(&data).unwrap();
-        
+
         assert_eq!(original.block_height, loaded.block_height);
         assert_eq!(original.epoch, loaded.epoch);
     }
@@ -250,7 +250,7 @@ mod tests {
 
         // Load and migrate
         let migrated = deserialize_state_smart(&versioned_bytes).unwrap();
-        
+
         assert_eq!(migrated.block_height, 100);
         assert_eq!(migrated.epoch, 5);
         assert!(migrated.registered_hotkeys.is_empty()); // New field initialized
@@ -281,7 +281,7 @@ mod tests {
 
         // Smart deserialize should detect and migrate
         let migrated = deserialize_state_smart(&raw_v1).unwrap();
-        
+
         assert_eq!(migrated.block_height, 50);
     }
 
