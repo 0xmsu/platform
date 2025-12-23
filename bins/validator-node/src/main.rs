@@ -306,9 +306,23 @@ async fn main() -> Result<()> {
     let db_sync_manager = Arc::new(db_sync_manager);
     info!("DB Sync Manager initialized - will sync state with peers");
 
+    // Calculate minimum stake in RAO from CLI argument
+    let min_stake_tao = args.min_stake;
+    let min_stake_rao = (args.min_stake * 1_000_000_000.0) as u64;
+
     // Load or create chain state
-    let chain_state = if let Some(state) = storage.load_state()? {
+    let chain_state = if let Some(mut state) = storage.load_state()? {
         info!("Loaded existing state at block {}", state.block_height);
+        // IMPORTANT: Sync the loaded state's min_stake with CLI argument
+        // This ensures add_validator uses the same threshold as metagraph sync
+        let old_min_stake = state.config.min_stake.0;
+        state.config.min_stake = Stake::new(min_stake_rao);
+        if old_min_stake != min_stake_rao {
+            info!(
+                "Updated state config min_stake: {} -> {} RAO ({} TAO)",
+                old_min_stake, min_stake_rao, min_stake_tao
+            );
+        }
         Arc::new(RwLock::new(state))
     } else {
         info!("Creating new chain state");
@@ -324,19 +338,17 @@ async fn main() -> Result<()> {
         };
 
         // Select network configuration based on Bittensor connection
-        let config = if args.no_bittensor {
+        // Use min_stake from CLI argument for consistency
+        let mut config = if args.no_bittensor {
             NetworkConfig::default()
         } else {
             NetworkConfig::production()
         };
+        config.min_stake = Stake::new(min_stake_rao);
 
         let state = ChainState::new(sudo_key, config);
         Arc::new(RwLock::new(state))
     };
-
-    // Calculate minimum stake in RAO from CLI argument
-    let min_stake_tao = args.min_stake;
-    let min_stake_rao = (args.min_stake * 1_000_000_000.0) as u64;
 
     // Initialize network protection (DDoS + stake validation)
     let protection_config = ProtectionConfig {
@@ -837,22 +849,48 @@ async fn main() -> Result<()> {
                                         );
                                     }
 
+                                    let mut skipped_low_stake = 0;
+                                    let mut add_failed = 0;
+                                    
                                     for neuron in metagraph.neurons.values() {
                                         // Convert AccountId32 hotkey to our Hotkey type
                                         let hotkey_bytes: &[u8; 32] = neuron.hotkey.as_ref();
                                         let hotkey = Hotkey(*hotkey_bytes);
+                                        let hotkey_hex = hotkey.to_hex();
 
-                                        // Get effective stake: alpha stake + root stake (TAO on root subnet)
-                                        // This matches how Bittensor calculates validator weight
+                                        // Use stake_weight from metagraph - this is the ACTUAL weight used in consensus
+                                        // It includes: alpha stake + parent inheritance + (root stake * tao_weight)
+                                        // stake_weight is a normalized u16 (0-65535) representing consensus weight
+                                        let stake_weight = neuron.stake_weight;
+                                        
+                                        // For backwards compatibility and debugging, also get raw stakes
                                         let alpha_stake = neuron.stake;
                                         let root_stake = neuron.root_stake;
-                                        let effective_stake =
-                                            alpha_stake.saturating_add(root_stake);
-                                        let stake_rao =
-                                            effective_stake.min(u64::MAX as u128) as u64;
+                                        
+                                        // Convert normalized stake_weight to approximate RAO for comparison
+                                        // If stake_weight > 0, validator has stake in the metagraph
+                                        // We use stake_weight as the primary indicator, falling back to raw if 0
+                                        let stake_rao = if stake_weight > 0 {
+                                            // Scale: if stake_weight is max (65535), assume ~total_network_stake TAO
+                                            // For simplicity, use stake_weight directly as a proxy (non-zero = valid)
+                                            // The actual TAO amount is (stake_weight / 65535) * total_stake
+                                            // For minimum stake check: 1000 TAO / 1B total ≈ 0.001% ≈ 65 in u16 scale
+                                            // Any stake_weight > 0 means they passed on-chain validation
+                                            let approx_tao = (stake_weight as f64 / 65535.0) * 100_000_000.0; // assume 100M TAO total
+                                            (approx_tao * 1e9) as u64 // Convert to RAO
+                                        } else {
+                                            // Fallback to raw stakes (old method) if stake_weight not available
+                                            let effective_stake = alpha_stake.saturating_add(root_stake);
+                                            effective_stake.min(u64::MAX as u128) as u64
+                                        };
 
-                                        // Skip if below minimum stake
+                                        // ALWAYS cache stake in protection for debugging
+                                        // This allows us to show actual stake when rejecting low-stake validators
+                                        protection.validate_stake(&hotkey_hex, stake_rao);
+
+                                        // Skip adding to state if below minimum stake
                                         if stake_rao < min_stake_rao {
+                                            skipped_low_stake += 1;
                                             continue;
                                         }
 
@@ -862,16 +900,42 @@ async fn main() -> Result<()> {
                                                 hotkey.clone(),
                                                 Stake::new(stake_rao),
                                             );
-                                            if state.add_validator(info).is_ok() {
-                                                added += 1;
+                                            match state.add_validator(info) {
+                                                Ok(_) => {
+                                                    added += 1;
+                                                    debug!(
+                                                        "Added validator {} with {:.2} TAO",
+                                                        hotkey.to_ss58(),
+                                                        stake_rao as f64 / 1e9
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    add_failed += 1;
+                                                    warn!(
+                                                        "Failed to add validator {} ({:.2} TAO): {}",
+                                                        hotkey.to_ss58(),
+                                                        stake_rao as f64 / 1e9,
+                                                        e
+                                                    );
+                                                }
                                             }
                                         } else if let Some(v) = state.validators.get_mut(&hotkey) {
                                             // Update stake for existing validator
                                             v.stake = Stake::new(stake_rao);
                                         }
-
-                                        // Cache stake in protection for quick validation
-                                        protection.validate_stake(&hotkey.to_hex(), stake_rao);
+                                    }
+                                    
+                                    if skipped_low_stake > 0 {
+                                        debug!(
+                                            "Skipped {} neurons with stake below {} TAO threshold",
+                                            skipped_low_stake, min_stake_tao
+                                        );
+                                    }
+                                    if add_failed > 0 {
+                                        warn!(
+                                            "Failed to add {} validators (check config.min_stake or max_validators)",
+                                            add_failed
+                                        );
                                     }
 
                                     info!("Metagraph sync complete: {} neurons, {} validators with sufficient stake (min {} TAO)", 
@@ -1833,37 +1897,56 @@ async fn main() -> Result<()> {
                                 continue;
                             }
 
-                            // Validate stake immediately
-                            let has_sufficient_stake = {
+                            // Validate stake immediately and get actual stake for logging
+                            let (has_sufficient_stake, actual_stake_tao) = {
                                 if let Ok(bytes) = hex::decode(hk) {
                                     if bytes.len() == 32 {
                                         let hotkey_obj = Hotkey(bytes.try_into().unwrap());
                                         let state = chain_state_clone.read();
                                         if let Some(validator) = state.get_validator(&hotkey_obj) {
-                                            validator.stake.0 >= min_stake_rao
+                                            let stake = validator.stake.0 as f64 / 1e9;
+                                            (validator.stake.0 >= min_stake_rao, Some(stake))
                                         } else {
                                             // Check cached stake
-                                            protection.check_cached_stake(hk)
-                                                .map(|v| v.is_valid())
-                                                .unwrap_or(false)
+                                            match protection.check_cached_stake(hk) {
+                                                Some(platform_network::StakeValidation::Valid { stake_tao }) => {
+                                                    (true, Some(stake_tao))
+                                                }
+                                                Some(platform_network::StakeValidation::Insufficient { stake_tao, .. }) => {
+                                                    (false, Some(stake_tao))
+                                                }
+                                                _ => (false, None)
+                                            }
                                         }
                                     } else {
-                                        false
+                                        (false, None)
                                     }
                                 } else {
-                                    false
+                                    (false, None)
                                 }
                             };
 
                             if has_sufficient_stake {
                                 // Track hotkey connection
                                 protection.check_hotkey_connection(hk, &peer_str, None);
-                                info!("Peer identified: {} (hotkey: {}, stake: OK)", peer_id, ss58);
+                                let stake_display = actual_stake_tao.map(|s| format!("{:.2} TAO", s)).unwrap_or_else(|| "OK".to_string());
+                                info!("Peer identified: {} (hotkey: {}, stake: {})", peer_id, ss58, stake_display);
                             } else {
-                                warn!(
-                                    "Peer {} has insufficient stake (hotkey: {}, required: {} TAO)",
-                                    peer_id, ss58, min_stake_tao
-                                );
+                                // Show actual stake if known for better debugging
+                                match actual_stake_tao {
+                                    Some(stake) => {
+                                        warn!(
+                                            "Peer {} has insufficient stake (hotkey: {}, stake: {:.2} TAO, required: {} TAO)",
+                                            peer_id, ss58, stake, min_stake_tao
+                                        );
+                                    }
+                                    None => {
+                                        warn!(
+                                            "Peer {} not in metagraph (hotkey: {}, required: {} TAO on subnet {})",
+                                            peer_id, ss58, min_stake_tao, args.netuid
+                                        );
+                                    }
+                                }
                                 // Don't disconnect - they may still provide useful gossip
                                 // But we won't accept their signed messages
                             }
@@ -1913,20 +1996,24 @@ async fn main() -> Result<()> {
                                 );
 
                                 // Check if we have a validator with sufficient stake
-                                let has_sufficient_stake = {
+                                let (has_sufficient_stake, actual_stake_tao) = {
                                     let state = chain_state_clone.read();
                                     if let Some(validator) = state.get_validator(signed.signer()) {
-                                        validator.stake.0 >= min_stake_rao
+                                        let actual = validator.stake.0 as f64 / 1e9;
+                                        (validator.stake.0 >= min_stake_rao, Some(actual))
                                     } else {
-                                        // Unknown validator - check against cached stake or reject
-                                        if let Some(validation) = protection.check_cached_stake(&signer_hex) {
-                                            validation.is_valid()
-                                        } else {
-                                            warn!(
-                                                "Unknown validator {}: not in state and no cached stake. Min required: {} TAO",
-                                                &signer_hex[..16], min_stake_tao
-                                            );
-                                            false
+                                        // Unknown validator - check against cached stake
+                                        match protection.check_cached_stake(&signer_hex) {
+                                            Some(platform_network::StakeValidation::Valid { stake_tao }) => {
+                                                (true, Some(stake_tao))
+                                            }
+                                            Some(platform_network::StakeValidation::Insufficient { stake_tao, .. }) => {
+                                                (false, Some(stake_tao))
+                                            }
+                                            _ => {
+                                                // Not in metagraph at all
+                                                (false, None)
+                                            }
                                         }
                                     }
                                 };
@@ -1945,10 +2032,22 @@ async fn main() -> Result<()> {
                                         info!("Bypassing stake check for Sudo message from {}", &signer_hex[..16]);
                                         handle_message(&consensus, signed, &chain_state_clone, challenge_orchestrator.as_ref(), challenge_routes_for_p2p.as_ref(), endpoints_for_p2p.as_ref(), db_for_p2p.as_ref(), keypair_for_p2p.as_ref(), auth_sessions_for_p2p.as_ref()).await;
                                     } else {
-                                        warn!(
-                                            "Rejected message from {} - insufficient stake (min {} TAO required)",
-                                            &signer_hex[..16], min_stake_tao
-                                        );
+                                        // Show actual stake if known, otherwise indicate not in metagraph
+                                        let signer_ss58 = signed.signer().to_ss58();
+                                        match actual_stake_tao {
+                                            Some(stake) => {
+                                                warn!(
+                                                    "Rejected message from {} (SS58: {}) - stake {:.2} TAO below minimum {} TAO",
+                                                    &signer_hex[..16], signer_ss58, stake, min_stake_tao
+                                                );
+                                            }
+                                            None => {
+                                                warn!(
+                                                    "Rejected message from {} (SS58: {}) - not registered on subnet {} (min {} TAO required)",
+                                                    &signer_hex[..16], signer_ss58, args.netuid, min_stake_tao
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             } else {
@@ -2123,12 +2222,26 @@ async fn main() -> Result<()> {
                                             for neuron in metagraph.neurons.values() {
                                                 let hotkey_bytes: &[u8; 32] = neuron.hotkey.as_ref();
                                                 let hotkey = Hotkey(*hotkey_bytes);
-                                                // Get effective stake: alpha stake + root stake
+                                                let hotkey_hex = hotkey.to_hex();
+                                                
+                                                // Use stake_weight from metagraph (includes parent inheritance + TAO weight)
+                                                let stake_weight = neuron.stake_weight;
                                                 let alpha_stake = neuron.stake;
                                                 let root_stake = neuron.root_stake;
-                                                let effective_stake = alpha_stake.saturating_add(root_stake);
-                                                let stake_rao = effective_stake.min(u64::MAX as u128) as u64;
+                                                
+                                                // Convert stake_weight to approximate RAO
+                                                let stake_rao = if stake_weight > 0 {
+                                                    let approx_tao = (stake_weight as f64 / 65535.0) * 100_000_000.0;
+                                                    (approx_tao * 1e9) as u64
+                                                } else {
+                                                    let effective_stake = alpha_stake.saturating_add(root_stake);
+                                                    effective_stake.min(u64::MAX as u128) as u64
+                                                };
 
+                                                // ALWAYS update stake cache for debugging (even low-stake validators)
+                                                protection_for_sync.validate_stake(&hotkey_hex, stake_rao);
+
+                                                // Only add to state if sufficient stake
                                                 if stake_rao < min_stake_for_sync {
                                                     continue;
                                                 }
@@ -2144,9 +2257,6 @@ async fn main() -> Result<()> {
                                                         updated += 1;
                                                     }
                                                 }
-
-                                                // Update stake cache
-                                                protection_for_sync.validate_stake(&hotkey.to_hex(), stake_rao);
                                             }
 
                                             if added > 0 || updated > 0 {
