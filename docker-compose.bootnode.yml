@@ -42,11 +42,12 @@ services:
     # No --bootstrap = this IS the bootnode
     # Other validators will connect to bootnode.platform.network:9000
     command: >
-      /app/validator-node
+      /usr/local/bin/validator-node
       --data-dir /data
       --rpc-port 8080
       --listen /ip4/0.0.0.0/tcp/9000
       --netuid 100
+      --no-bootnode
       --subtensor-endpoint wss://entrypoint-finney.opentensor.ai:443
       --epoch-length 360
       --sudo-key 50780547322a1ceba67ea8c552c9bc6c686f8698ac9a8cafab7cd15a1db19859
