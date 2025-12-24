@@ -1641,6 +1641,7 @@ async fn run_validator() -> Result<()> {
         let state_for_outbox = chain_state.clone();
         let net_cmd_tx_for_outbox = net_cmd_tx.clone();
         let keypair_for_outbox = keypair.clone();
+        let endpoints_for_outbox = challenge_endpoints.clone();
 
         tokio::spawn(async move {
             let client = reqwest::Client::new();
@@ -1649,15 +1650,26 @@ async fn run_validator() -> Result<()> {
             loop {
                 tokio::time::sleep(poll_interval).await;
 
-                // Get all challenge containers
-                let configs: Vec<ChallengeContainerConfig> = {
-                    let state = state_for_outbox.read();
-                    state.challenge_configs.values().cloned().collect()
+                // Get all challenge endpoints (these have the real container hostnames with suffixes)
+                let endpoints: Vec<(String, String)> = {
+                    endpoints_for_outbox.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
                 };
 
-                for config in configs {
-                    let container_name = config.name.to_lowercase().replace([' ', '_'], "-");
-                    let outbox_url = format!("http://challenge-{}:8080/p2p/outbox", container_name);
+                // Also get configs for challenge metadata
+                let configs: std::collections::HashMap<String, ChallengeContainerConfig> = {
+                    let state = state_for_outbox.read();
+                    state.challenge_configs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+                };
+
+                for (challenge_id, endpoint) in endpoints {
+                    // Use the real endpoint (includes suffix like challenge-term-challenge-4133b3431b1c)
+                    let outbox_url = format!("{}/p2p/outbox", endpoint);
+                    
+                    // Get config for this challenge
+                    let config = match configs.get(&challenge_id) {
+                        Some(c) => c.clone(),
+                        None => continue, // Skip if no config found
+                    };
 
                     match client.get(&outbox_url).send().await {
                         Ok(resp) if resp.status().is_success() => {
@@ -1665,6 +1677,9 @@ async fn run_validator() -> Result<()> {
                                 if let Some(messages) =
                                     outbox.get("messages").and_then(|m| m.as_array())
                                 {
+                                    if !messages.is_empty() {
+                                        info!("Found {} messages in outbox for challenge {}", messages.len(), challenge_id);
+                                    }
                                     for msg_value in messages {
                                         // Parse the outbox message
                                         if let (Some(message), target) = (
@@ -1706,7 +1721,7 @@ async fn run_validator() -> Result<()> {
 
                                                     // Send response back to container via P2P message endpoint
                                                     let p2p_response = platform_challenge_sdk::ChallengeP2PMessage::DecryptApiKeyResponse(response);
-                                                    let p2p_endpoint = format!("http://challenge-{}:8080/p2p/message", container_name);
+                                                    let p2p_endpoint = format!("{}/p2p/message", endpoint);
                                                     let req_body = serde_json::json!({
                                                         "from_hotkey": keypair_for_outbox.hotkey().to_hex(),
                                                         "message": p2p_response
