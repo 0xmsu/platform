@@ -3155,15 +3155,37 @@ async fn handle_message(
             }
 
             let challenge_id = challenge_msg.challenge_id.clone();
-            let container_name = challenge_id.to_lowercase().replace([' ', '_'], "-");
             let from_hotkey = signer.to_hex();
             let msg_payload = challenge_msg.payload.clone();
             let kp = keypair.unwrap().clone();
             let sessions = container_auth_sessions.unwrap().clone();
+            
+            // Look up the correct endpoint from the stored endpoints map
+            let base_url = if let Some(endpoints) = challenge_endpoints {
+                let eps = endpoints.read();
+                // Try to find endpoint by challenge name or ID
+                eps.get(&challenge_id)
+                    .or_else(|| eps.get(&challenge_id.to_lowercase().replace([' ', '_'], "-")))
+                    .cloned()
+            } else {
+                None
+            };
+            
+            let base_url = match base_url {
+                Some(url) => url,
+                None => {
+                    // Fallback to constructed URL (may not work with suffixed container names)
+                    let container_name = challenge_id.to_lowercase().replace([' ', '_'], "-");
+                    warn!(
+                        "No endpoint found for challenge '{}', using fallback URL (may fail)",
+                        challenge_id
+                    );
+                    format!("http://challenge-{}:8080", container_name)
+                }
+            };
 
             tokio::spawn(async move {
                 let client = reqwest::Client::new();
-                let base_url = format!("http://challenge-{}:8080", container_name);
                 let p2p_endpoint = format!("{}/p2p/message", base_url);
 
                 // Get or create authentication token
@@ -3172,8 +3194,8 @@ async fn handle_message(
                         Ok(token) => token,
                         Err(e) => {
                             warn!(
-                                "Failed to authenticate with container {}: {}",
-                                container_name, e
+                                "Failed to authenticate with container for challenge {}: {}",
+                                challenge_id, e
                             );
                             return;
                         }
@@ -3232,20 +3254,20 @@ async fn handle_message(
                     {
                         Ok(resp) if resp.status().is_success() => {
                             debug!(
-                                "Forwarded challenge message to container {} (authenticated)",
-                                container_name
+                                "Forwarded challenge message to {} (authenticated)",
+                                challenge_id
                             );
                         }
                         Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
                             // Token expired, remove from cache
                             sessions.write().remove(&challenge_id);
-                            warn!("Auth token expired for container {}, will re-authenticate on next message", container_name);
+                            warn!("Auth token expired for challenge {}, will re-authenticate on next message", challenge_id);
                         }
                         Ok(resp) => {
-                            debug!("Container {} returned {}", container_name, resp.status());
+                            debug!("Challenge {} container returned {}", challenge_id, resp.status());
                         }
                         Err(e) => {
-                            debug!("Failed to forward to container {}: {}", container_name, e);
+                            debug!("Failed to forward to challenge {} container: {}", challenge_id, e);
                         }
                     }
                 }
@@ -3287,7 +3309,6 @@ async fn handle_message(
             };
 
             if let Some(config) = challenge_config {
-                let container_name = config.name.to_lowercase().replace([' ', '_'], "-");
                 let agent_hash = submission.agent_hash.clone();
                 let agent_hash_for_log = agent_hash.clone();
                 let challenge_name = submission.challenge_id.clone();
@@ -3303,6 +3324,30 @@ async fn handle_message(
                     hex::encode(hasher.finalize())
                 });
                 let validator_hotkey = signer.to_hex();
+                
+                // Look up the correct endpoint from the stored endpoints map
+                let base_url = if let Some(endpoints) = challenge_endpoints {
+                    let eps = endpoints.read();
+                    // Try to find endpoint by challenge name, config name, or challenge ID
+                    eps.get(&config.name)
+                        .or_else(|| eps.get(&challenge_id.to_string()))
+                        .or_else(|| eps.get(&config.name.to_lowercase().replace([' ', '_'], "-")))
+                        .cloned()
+                } else {
+                    None
+                };
+                
+                let base_url = match base_url {
+                    Some(url) => url,
+                    None => {
+                        let container_name = config.name.to_lowercase().replace([' ', '_'], "-");
+                        warn!(
+                            "No endpoint found for challenge '{}', using fallback URL",
+                            config.name
+                        );
+                        format!("http://challenge-{}:8080", container_name)
+                    }
+                };
 
                 // Forward agent submission to container and sign consensus
                 tokio::spawn(async move {
@@ -3311,8 +3356,7 @@ async fn handle_message(
                     // Step 1: If we have source code, submit the agent to our local container
                     // This ensures the container has the agent registered for evaluation
                     if let Some(ref code) = source_code {
-                        let submit_endpoint =
-                            format!("http://challenge-{}:8080/submit", container_name);
+                        let submit_endpoint = format!("{}/submit", base_url);
 
                         let submit_payload = serde_json::json!({
                             "source_code": code,
@@ -3355,8 +3399,7 @@ async fn handle_message(
                     }
 
                     // Step 2: Sign consensus for this agent (allows evaluation to proceed)
-                    let consensus_endpoint =
-                        format!("http://challenge-{}:8080/consensus/sign", container_name);
+                    let consensus_endpoint = format!("{}/consensus/sign", base_url);
 
                     let sign_payload = serde_json::json!({
                         "agent_hash": agent_hash,
