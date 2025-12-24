@@ -3230,6 +3230,22 @@ async fn handle_message(
                             None
                         }
                     }
+                    platform_core::ChallengeMessageType::Custom(ref custom_type) => {
+                        // For p2p_bridge messages, forward the raw payload as ChallengeP2PMessage
+                        if let Ok(p2p_msg) = serde_json::from_slice::<
+                            platform_challenge_sdk::ChallengeP2PMessage,
+                        >(&msg_payload)
+                        {
+                            debug!(
+                                "Forwarding Custom({}) message to challenge container",
+                                custom_type
+                            );
+                            Some(p2p_msg)
+                        } else {
+                            warn!("Failed to parse Custom({}) payload as ChallengeP2PMessage", custom_type);
+                            None
+                        }
+                    }
                     _ => {
                         debug!(
                             "Unhandled challenge message type: {:?}",
