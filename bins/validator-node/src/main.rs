@@ -66,6 +66,124 @@ struct ContainerAuthResponse {
     error: Option<String>,
 }
 
+// ==================== Platform Server Client ====================
+
+/// Client for communicating with the centralized platform-server
+#[derive(Clone)]
+struct PlatformServerClient {
+    base_url: String,
+    client: reqwest::Client,
+}
+
+impl PlatformServerClient {
+    fn new(base_url: &str) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to create HTTP client");
+
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            client,
+        }
+    }
+
+    /// Fetch weights for a specific challenge from platform-server
+    async fn get_challenge_weights(
+        &self,
+        challenge_id: &str,
+        epoch: u64,
+    ) -> Result<Vec<(u16, u16)>> {
+        let url = format!(
+            "{}/api/v1/challenges/{}/get_weights?epoch={}",
+            self.base_url, challenge_id, epoch
+        );
+
+        let response =
+            self.client.get(&url).send().await.map_err(|e| {
+                anyhow::anyhow!("Failed to fetch weights from platform-server: {}", e)
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Platform server returned error {}: {}",
+                status,
+                body
+            ));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct WeightsResponse {
+            weights: Vec<WeightEntry>,
+            #[allow(dead_code)]
+            epoch: u64,
+            #[allow(dead_code)]
+            challenge_id: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct WeightEntry {
+            uid: u16,
+            weight: u16,
+        }
+
+        let weights_resp: WeightsResponse = response
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to parse weights response: {}", e))?;
+
+        Ok(weights_resp
+            .weights
+            .into_iter()
+            .map(|w| (w.uid, w.weight))
+            .collect())
+    }
+
+    /// List all active challenges from platform-server
+    async fn list_challenges(&self) -> Result<Vec<ChallengeInfo>> {
+        let url = format!("{}/api/v1/challenges", self.base_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list challenges: {}", e))?;
+
+        if !response.status().is_success() {
+            return Ok(vec![]);
+        }
+
+        let challenges: Vec<ChallengeInfo> = response.json().await.unwrap_or_default();
+        Ok(challenges)
+    }
+
+    /// Check health of platform-server
+    async fn health_check(&self) -> bool {
+        let url = format!("{}/health", self.base_url);
+        self.client
+            .get(&url)
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ChallengeInfo {
+    id: String,
+    name: String,
+    #[serde(default)]
+    mechanism_id: u8,
+    #[serde(default)]
+    emission_weight: f64,
+    #[serde(default)]
+    is_healthy: bool,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "validator-node")]
 #[command(about = "Mini-chain validator node")]
@@ -176,6 +294,13 @@ struct Args {
     /// If not set, broker runs without auth (development mode only)
     #[arg(long, env = "BROKER_JWT_SECRET")]
     broker_jwt_secret: Option<String>,
+
+    // === Platform Server Integration ===
+    /// Platform server URL for centralized orchestration
+    /// When set, validator fetches weights from platform-server instead of local calculation
+    /// Example: https://chain.platform.network
+    #[arg(long, env = "PLATFORM_SERVER_URL")]
+    platform_server: Option<String>,
 }
 
 /// Initialize Sentry error monitoring
@@ -1435,6 +1560,49 @@ async fn run_validator() -> Result<()> {
         None
     };
 
+    // ==========================================================================
+    // Platform Server Client (for centralized weight calculation)
+    // ==========================================================================
+    let platform_server_client: Option<Arc<PlatformServerClient>> =
+        if let Some(ref platform_url) = args.platform_server {
+            info!("Connecting to platform server: {}", platform_url);
+            let client = PlatformServerClient::new(platform_url);
+
+            // Verify connectivity
+            if client.health_check().await {
+                info!("Platform server connection verified");
+
+                // List available challenges
+                match client.list_challenges().await {
+                    Ok(challenges) => {
+                        if challenges.is_empty() {
+                            info!("No challenges registered on platform server yet");
+                        } else {
+                            info!("Platform server challenges:");
+                            for c in &challenges {
+                                info!(
+                                    "  - {} (mechanism={}, weight={:.2}, healthy={})",
+                                    c.id, c.mechanism_id, c.emission_weight, c.is_healthy
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => warn!("Failed to list platform server challenges: {}", e),
+                }
+
+                Some(Arc::new(client))
+            } else {
+                warn!(
+                "Platform server not reachable at {} - falling back to local weight calculation",
+                platform_url
+            );
+                None
+            }
+        } else {
+            info!("Platform server not configured - using local weight calculation");
+            None
+        };
+
     // Spawn orchestrator command handler (receives commands from RPC sudo_submit)
     // Also handles dynamic route discovery via /.well-known/routes
     if let (Some(mut rx), Some(orch)) = (orchestrator_cmd_rx, challenge_orchestrator.clone()) {
@@ -1928,6 +2096,7 @@ async fn run_validator() -> Result<()> {
     let runtime_for_blocks = challenge_runtime.clone();
     let subtensor_clone = subtensor.clone();
     let subtensor_signer_clone = subtensor_signer.clone();
+    let platform_server_for_loop = platform_server_client.clone();
     let db_for_blocks = distributed_db.clone();
     let db_sync_for_loop = db_sync_manager.clone();
     let mut block_counter = 0u64;
@@ -2158,8 +2327,51 @@ async fn run_validator() -> Result<()> {
                         // Collect and commit weights for all mechanisms
                         // With Subtensor, set_weights() handles commit-reveal automatically
                         if let (Some(st), Some(signer)) = (subtensor_clone.as_ref(), subtensor_signer_clone.as_ref()) {
-                            // Collect weights from all challenges
-                            let mechanism_weights = runtime_for_blocks.collect_and_get_weights().await;
+                            // Try to get weights from platform-server first (centralized, deterministic)
+                            let mechanism_weights = if let Some(ref ps_client) = platform_server_for_loop {
+                                info!("Fetching weights from platform-server for epoch {}...", epoch);
+
+                                // Get challenges from platform server
+                                match ps_client.list_challenges().await {
+                                    Ok(challenges) if !challenges.is_empty() => {
+                                        let mut weights_from_server = Vec::new();
+
+                                        for challenge in challenges {
+                                            match ps_client.get_challenge_weights(&challenge.id, epoch).await {
+                                                Ok(weight_pairs) => {
+                                                    let uids: Vec<u16> = weight_pairs.iter().map(|(u, _)| *u).collect();
+                                                    let weights: Vec<u16> = weight_pairs.iter().map(|(_, w)| *w).collect();
+
+                                                    info!(
+                                                        "Got {} weights for challenge {} (mechanism {}) from platform-server",
+                                                        uids.len(), challenge.id, challenge.mechanism_id
+                                                    );
+
+                                                    if !uids.is_empty() {
+                                                        weights_from_server.push((challenge.mechanism_id, uids, weights));
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    warn!("Failed to get weights for challenge {}: {}", challenge.id, e);
+                                                }
+                                            }
+                                        }
+
+                                        weights_from_server
+                                    }
+                                    Ok(_) => {
+                                        info!("No challenges on platform-server, using local weights");
+                                        runtime_for_blocks.collect_and_get_weights().await
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to list platform-server challenges: {}, using local weights", e);
+                                        runtime_for_blocks.collect_and_get_weights().await
+                                    }
+                                }
+                            } else {
+                                // No platform-server - use local weight calculation
+                                runtime_for_blocks.collect_and_get_weights().await
+                            };
 
                             let weights_to_submit = if mechanism_weights.is_empty() {
                                 // No challenge weights - submit burn weights to UID 0
