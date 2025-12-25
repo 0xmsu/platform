@@ -16,6 +16,7 @@ members = [
     "crates/distributed-db",
     "crates/secure-container-runtime",
     "crates/platform-server",
+    "bins/platform",
     "bins/validator-node",
     "bins/csudo",
     "bins/utils",
