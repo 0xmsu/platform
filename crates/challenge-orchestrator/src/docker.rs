@@ -503,6 +503,8 @@ impl DockerClient {
         env.push("TASKS_DIR=/app/data/tasks".to_string());
         env.push("DATA_DIR=/data".to_string());
         env.push("RUST_LOG=info,term_challenge=debug".to_string());
+        // Force challenge server to listen on port 8080 (orchestrator expects this)
+        env.push("PORT=8080".to_string());
         // For Docker-in-Docker: tasks are at /host-tasks on host (we mount below)
         // The HOST_TASKS_DIR tells the challenge how to map container paths to host paths
         env.push("HOST_TASKS_DIR=/tmp/platform-tasks".to_string());
