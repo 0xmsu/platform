@@ -56,13 +56,13 @@ COPY . .
 # Build all binaries
 RUN cargo build --release -p platform -p validator-node -p csudo
 
-# Runtime stage
-FROM debian:bookworm-slim
+# Runtime stage (Ubuntu 24.04 for glibc 2.39 compatibility)
+FROM ubuntu:24.04
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    libssl3 \
+    libssl3t64 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
