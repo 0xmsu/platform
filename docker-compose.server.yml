@@ -26,6 +26,9 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - RUST_LOG=info,platform_server=debug
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     networks:
       - platform-challenges
     healthcheck:
