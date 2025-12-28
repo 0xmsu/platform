@@ -448,6 +448,18 @@ pub async fn get_leaderboard(pool: &Pool, limit: usize) -> Result<Vec<Leaderboar
         .collect())
 }
 
+/// Get leaderboard for a specific challenge
+/// For now, returns the global leaderboard (single challenge mode)
+pub async fn get_leaderboard_for_challenge(
+    pool: &Pool,
+    _challenge_id: &str,
+    limit: usize,
+) -> Result<Vec<LeaderboardEntry>> {
+    // Currently all submissions are for a single challenge
+    // In the future, filter by challenge_id
+    get_leaderboard(pool, limit).await
+}
+
 // ============================================================================
 // CHALLENGE CONFIG
 // ============================================================================
