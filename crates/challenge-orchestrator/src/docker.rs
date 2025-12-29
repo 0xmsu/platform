@@ -544,6 +544,21 @@ impl DockerClient {
         if let Ok(owner_hotkey) = std::env::var("OWNER_HOTKEY") {
             env.push(format!("OWNER_HOTKEY={}", owner_hotkey));
         }
+        // Pass DATABASE_URL with challenge-specific database name
+        if let Ok(db_url) = std::env::var("DATABASE_URL") {
+            // Replace database name with challenge name
+            // Format: postgresql://user:pass@host:port/dbname -> postgresql://user:pass@host:port/challenge_name
+            let challenge_db_name = config.name.to_lowercase().replace(['-', ' '], "_");
+            if let Some(last_slash) = db_url.rfind('/') {
+                let base_url = &db_url[..last_slash];
+                let challenge_db_url = format!("{}/{}", base_url, challenge_db_name);
+                env.push(format!("DATABASE_URL={}", challenge_db_url));
+                debug!(challenge = %config.name, db = %challenge_db_name, "Set challenge DATABASE_URL");
+            } else {
+                // No slash found, just append
+                env.push(format!("DATABASE_URL={}/{}", db_url, challenge_db_name));
+            }
+        }
         // Pass Platform URL for metagraph verification
         // Use VALIDATOR_NAME to determine if we're server or validator
         let platform_host = std::env::var("VALIDATOR_NAME")
