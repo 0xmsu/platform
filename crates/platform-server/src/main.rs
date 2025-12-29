@@ -212,6 +212,16 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/leaderboard/:agent_hash",
             get(api::leaderboard::get_agent_rank),
         )
+        // === JOB QUEUE (validators claim and complete jobs) ===
+        .route("/api/v1/jobs/claim", post(api::jobs::claim_job))
+        .route(
+            "/api/v1/jobs/:job_id/progress",
+            post(api::jobs::report_progress),
+        )
+        .route(
+            "/api/v1/jobs/:job_id/complete",
+            post(api::jobs::complete_job),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()

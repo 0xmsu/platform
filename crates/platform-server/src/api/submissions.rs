@@ -65,6 +65,23 @@ pub async fn submit_agent(
 ) -> Result<Json<SubmitAgentResponse>, (StatusCode, Json<SubmitAgentResponse>)> {
     let epoch = queries::get_current_epoch(&state.db).await.unwrap_or(0);
 
+    // Rate limiting: 0.33 submissions per epoch (1 every 3 epochs)
+    let can_submit = queries::can_miner_submit(&state.db, &req.miner_hotkey, epoch)
+        .await
+        .unwrap_or(false);
+
+    if !can_submit {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(SubmitAgentResponse {
+                success: false,
+                submission_id: None,
+                agent_hash: None,
+                error: Some("Rate limit: 1 submission per 3 epochs".to_string()),
+            }),
+        ));
+    }
+
     // Create submission with API key for centralized LLM inference
     let submission = queries::create_submission(
         &state.db,
@@ -97,6 +114,26 @@ pub async fn submit_agent(
         req.api_provider
     );
 
+    // Create evaluation job for each active challenge
+    let challenges = queries::get_challenges(&state.db).await.unwrap_or_default();
+
+    for challenge in challenges.iter().filter(|c| c.status == "active") {
+        match queries::create_job(&state.db, &submission.id, &challenge.id).await {
+            Ok(job) => {
+                tracing::info!(
+                    "Created job {} for submission {} on challenge {}",
+                    job.id,
+                    &submission.id[..8],
+                    challenge.id
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create job for challenge {}: {}", challenge.id, e);
+            }
+        }
+    }
+
+    // Broadcast submission event
     state
         .broadcast_event(WsEvent::SubmissionReceived(SubmissionEvent {
             submission_id: submission.id.clone(),

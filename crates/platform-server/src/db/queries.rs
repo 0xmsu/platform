@@ -874,3 +874,305 @@ pub async fn delete_challenge(pool: &Pool, challenge_id: &str) -> Result<bool> {
         .await?;
     Ok(result > 0)
 }
+
+// ============================================================================
+// EVALUATION JOB QUEUE
+// ============================================================================
+
+use crate::models::{EvaluationJob, JobStatus, TaskResultSummary};
+
+/// Create a new evaluation job from a submission
+pub async fn create_job(
+    pool: &Pool,
+    submission_id: &str,
+    challenge_id: &str,
+) -> Result<EvaluationJob> {
+    let client = pool.get().await?;
+    let job_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp();
+
+    // Get submission details
+    let sub = get_submission(pool, submission_id)
+        .await?
+        .ok_or_else(|| anyhow!("Submission not found"))?;
+
+    client
+        .execute(
+            "INSERT INTO evaluation_jobs (id, submission_id, agent_hash, miner_hotkey, 
+             source_code, api_key, api_provider, challenge_id, status, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())",
+            &[
+                &job_id,
+                &submission_id,
+                &sub.agent_hash,
+                &sub.miner_hotkey,
+                &sub.source_code,
+                &sub.api_key,
+                &sub.api_provider,
+                &challenge_id,
+            ],
+        )
+        .await?;
+
+    Ok(EvaluationJob {
+        id: job_id,
+        submission_id: submission_id.to_string(),
+        agent_hash: sub.agent_hash,
+        miner_hotkey: sub.miner_hotkey,
+        source_code: sub.source_code.unwrap_or_default(),
+        api_key: sub.api_key,
+        api_provider: sub.api_provider,
+        challenge_id: challenge_id.to_string(),
+        created_at: now,
+        status: JobStatus::Pending,
+        assigned_validator: None,
+        assigned_at: None,
+    })
+}
+
+/// Claim the next pending job for a challenge
+pub async fn claim_next_job(
+    pool: &Pool,
+    validator_hotkey: &str,
+    challenge_id: &str,
+) -> Result<Option<EvaluationJob>> {
+    let client = pool.get().await?;
+
+    // Use FOR UPDATE SKIP LOCKED for concurrent access
+    let row = client
+        .query_opt(
+            "UPDATE evaluation_jobs SET 
+                status = 'assigned',
+                assigned_validator = $1,
+                assigned_at = NOW()
+             WHERE id = (
+                SELECT id FROM evaluation_jobs 
+                WHERE challenge_id = $2 
+                AND status = 'pending'
+                ORDER BY created_at ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+             )
+             RETURNING id, submission_id, agent_hash, miner_hotkey, source_code, 
+                       api_key, api_provider, challenge_id, 
+                       EXTRACT(EPOCH FROM created_at)::BIGINT as created_at",
+            &[&validator_hotkey, &challenge_id],
+        )
+        .await?;
+
+    Ok(row.map(|r| EvaluationJob {
+        id: r.get(0),
+        submission_id: r.get(1),
+        agent_hash: r.get(2),
+        miner_hotkey: r.get(3),
+        source_code: r.get::<_, Option<String>>(4).unwrap_or_default(),
+        api_key: r.get(5),
+        api_provider: r.get(6),
+        challenge_id: r.get(7),
+        created_at: r.get(8),
+        status: JobStatus::Assigned,
+        assigned_validator: Some(validator_hotkey.to_string()),
+        assigned_at: Some(chrono::Utc::now().timestamp()),
+    }))
+}
+
+/// Get a job by ID
+pub async fn get_job(pool: &Pool, job_id: &str) -> Result<Option<EvaluationJob>> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT id, submission_id, agent_hash, miner_hotkey, source_code,
+                    api_key, api_provider, challenge_id, 
+                    EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
+                    status, assigned_validator, 
+                    EXTRACT(EPOCH FROM assigned_at)::BIGINT as assigned_at
+             FROM evaluation_jobs WHERE id = $1",
+            &[&job_id],
+        )
+        .await?;
+
+    Ok(row.map(|r| {
+        let status_str: String = r.get(9);
+        EvaluationJob {
+            id: r.get(0),
+            submission_id: r.get(1),
+            agent_hash: r.get(2),
+            miner_hotkey: r.get(3),
+            source_code: r.get::<_, Option<String>>(4).unwrap_or_default(),
+            api_key: r.get(5),
+            api_provider: r.get(6),
+            challenge_id: r.get(7),
+            created_at: r.get(8),
+            status: match status_str.as_str() {
+                "pending" => JobStatus::Pending,
+                "assigned" => JobStatus::Assigned,
+                "running" => JobStatus::Running,
+                "completed" => JobStatus::Completed,
+                "failed" => JobStatus::Failed,
+                _ => JobStatus::Pending,
+            },
+            assigned_validator: r.get(10),
+            assigned_at: r.get(11),
+        }
+    }))
+}
+
+/// Update job progress (task index and status)
+pub async fn update_job_progress(
+    pool: &Pool,
+    job_id: &str,
+    task_index: u32,
+    status: &str,
+) -> Result<()> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "UPDATE evaluation_jobs SET 
+                status = 'running',
+                current_task = $2,
+                last_progress = $3,
+                updated_at = NOW()
+             WHERE id = $1",
+            &[&job_id, &(task_index as i32), &status],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Mark job as completed
+pub async fn complete_job(pool: &Pool, job_id: &str) -> Result<()> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "UPDATE evaluation_jobs SET status = 'completed', updated_at = NOW() WHERE id = $1",
+            &[&job_id],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Save evaluation result with task details
+pub async fn save_evaluation(
+    pool: &Pool,
+    submission_id: &str,
+    agent_hash: &str,
+    validator_hotkey: &str,
+    score: f64,
+    tasks_passed: i32,
+    tasks_total: i32,
+    total_cost_usd: f64,
+    execution_time_ms: i64,
+    task_results: &[TaskResultSummary],
+    execution_log: Option<&str>,
+) -> Result<String> {
+    let client = pool.get().await?;
+    let eval_id = Uuid::new_v4().to_string();
+
+    let task_results_json = serde_json::to_value(task_results)?;
+
+    client
+        .execute(
+            "INSERT INTO evaluations (id, submission_id, agent_hash, validator_hotkey,
+             score, tasks_passed, tasks_total, tasks_failed, total_cost_usd,
+             execution_time_ms, task_results, execution_log, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())",
+            &[
+                &eval_id,
+                &submission_id,
+                &agent_hash,
+                &validator_hotkey,
+                &score,
+                &tasks_passed,
+                &tasks_total,
+                &(tasks_total - tasks_passed),
+                &total_cost_usd,
+                &execution_time_ms,
+                &task_results_json,
+                &execution_log,
+            ],
+        )
+        .await?;
+
+    // Update submission status
+    client
+        .execute(
+            "UPDATE submissions SET status = 'evaluating' WHERE id = $1",
+            &[&submission_id],
+        )
+        .await?;
+
+    Ok(eval_id)
+}
+
+/// Evaluation with validator stake for consensus calculation
+pub struct EvaluationWithStake {
+    pub score: f64,
+    pub validator_stake: u64,
+}
+
+/// Get all evaluations for an agent with stake info for consensus
+pub async fn get_evaluations_with_stake(
+    pool: &Pool,
+    agent_hash: &str,
+) -> Result<Vec<EvaluationWithStake>> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT e.score, COALESCE(v.stake, 0) as stake
+             FROM evaluations e
+             LEFT JOIN validators v ON e.validator_hotkey = v.hotkey
+             WHERE e.agent_hash = $1",
+            &[&agent_hash],
+        )
+        .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| EvaluationWithStake {
+            score: r.get(0),
+            validator_stake: r.get::<_, i64>(1) as u64,
+        })
+        .collect())
+}
+
+// ============================================================================
+// RATE LIMITING
+// ============================================================================
+
+/// Check if miner can submit (rate limit: 0.33 submissions per epoch = 1 every 3 epochs)
+pub async fn can_miner_submit(pool: &Pool, miner_hotkey: &str, current_epoch: u64) -> Result<bool> {
+    let client = pool.get().await?;
+
+    // Count submissions in last 3 epochs
+    let row = client
+        .query_one(
+            "SELECT COUNT(*) FROM submissions 
+             WHERE miner_hotkey = $1 AND epoch >= $2",
+            &[&miner_hotkey, &((current_epoch.saturating_sub(2)) as i64)],
+        )
+        .await?;
+
+    let count: i64 = row.get(0);
+    Ok(count == 0) // Can submit if no submissions in last 3 epochs
+}
+
+/// Get miner's submission count in recent epochs
+pub async fn get_miner_submission_count(
+    pool: &Pool,
+    miner_hotkey: &str,
+    epochs_back: u64,
+    current_epoch: u64,
+) -> Result<i64> {
+    let client = pool.get().await?;
+    let row = client
+        .query_one(
+            "SELECT COUNT(*) FROM submissions 
+             WHERE miner_hotkey = $1 AND epoch >= $2",
+            &[
+                &miner_hotkey,
+                &((current_epoch.saturating_sub(epochs_back)) as i64),
+            ],
+        )
+        .await?;
+    Ok(row.get(0))
+}

@@ -186,6 +186,30 @@ CREATE TABLE IF NOT EXISTS challenges (
 
 CREATE INDEX IF NOT EXISTS idx_challenges_status ON challenges(status);
 
+-- Evaluation jobs queue
+CREATE TABLE IF NOT EXISTS evaluation_jobs (
+    id VARCHAR(64) PRIMARY KEY,
+    submission_id VARCHAR(64) NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
+    agent_hash VARCHAR(128) NOT NULL,
+    miner_hotkey VARCHAR(128) NOT NULL,
+    source_code TEXT,
+    api_key TEXT,
+    api_provider VARCHAR(32),
+    challenge_id VARCHAR(64) NOT NULL,
+    status VARCHAR(32) DEFAULT 'pending',
+    assigned_validator VARCHAR(128),
+    assigned_at TIMESTAMPTZ,
+    current_task INTEGER DEFAULT 0,
+    last_progress VARCHAR(64),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON evaluation_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_challenge ON evaluation_jobs(challenge_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_validator ON evaluation_jobs(assigned_validator);
+CREATE INDEX IF NOT EXISTS idx_jobs_created ON evaluation_jobs(created_at ASC);
+
 -- Insert initial network state
 INSERT INTO network_state (key, value) VALUES 
     ('current_epoch', '0'),

@@ -305,11 +305,105 @@ pub enum WsEvent {
     #[serde(rename = "task_claimed")]
     TaskClaimed(TaskClaimedEvent),
 
+    #[serde(rename = "job_assigned")]
+    JobAssigned(JobAssignedEvent),
+
+    #[serde(rename = "job_progress")]
+    JobProgress(JobProgressEvent),
+
+    #[serde(rename = "job_completed")]
+    JobCompleted(JobCompletedEvent),
+
     #[serde(rename = "ping")]
     Ping,
 
     #[serde(rename = "pong")]
     Pong,
+}
+
+// ============================================================================
+// EVALUATION JOB QUEUE
+// ============================================================================
+
+/// Evaluation job to be assigned to validators
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvaluationJob {
+    pub id: String,
+    pub submission_id: String,
+    pub agent_hash: String,
+    pub miner_hotkey: String,
+    pub source_code: String,
+    pub api_key: Option<String>,
+    pub api_provider: Option<String>,
+    pub challenge_id: String,
+    pub created_at: i64,
+    pub status: JobStatus,
+    pub assigned_validator: Option<String>,
+    pub assigned_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStatus {
+    Pending,
+    Assigned,
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobAssignedEvent {
+    pub job_id: String,
+    pub submission_id: String,
+    pub agent_hash: String,
+    pub validator_hotkey: String,
+    pub challenge_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobProgressEvent {
+    pub job_id: String,
+    pub validator_hotkey: String,
+    pub task_index: u32,
+    pub task_total: u32,
+    pub task_id: String,
+    pub status: TaskProgressStatus,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskProgressStatus {
+    Started,
+    Running,
+    Passed,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobCompletedEvent {
+    pub job_id: String,
+    pub validator_hotkey: String,
+    pub submission_id: String,
+    pub agent_hash: String,
+    pub score: f64,
+    pub tasks_passed: u32,
+    pub tasks_total: u32,
+    pub total_cost_usd: f64,
+    pub execution_time_ms: u64,
+    pub task_results: Vec<TaskResultSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskResultSummary {
+    pub task_id: String,
+    pub passed: bool,
+    pub score: f64,
+    pub cost_usd: f64,
+    pub execution_time_ms: u64,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
