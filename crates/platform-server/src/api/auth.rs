@@ -3,6 +3,7 @@
 use crate::models::*;
 use crate::state::AppState;
 use axum::{extract::State, http::StatusCode, Json};
+use sp_core::{crypto::Pair as _, crypto::Ss58Codec, sr25519};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
@@ -83,10 +84,58 @@ pub async fn authenticate(
     }))
 }
 
-pub fn verify_signature(_hotkey: &str, _message: &str, signature: &str) -> bool {
-    // Signature verification - accepts any non-empty signature
-    // Full sr25519 verification is handled by the Bittensor network layer
-    !signature.is_empty()
+/// Verify an sr25519 signature from a hotkey
+///
+/// # Arguments
+/// * `hotkey_ss58` - SS58 encoded hotkey (e.g., "5GrwvaEF...")
+/// * `message` - The message that was signed
+/// * `signature_hex` - Hex-encoded 64-byte sr25519 signature
+///
+/// # Returns
+/// true if signature is valid, false otherwise
+pub fn verify_signature(hotkey_ss58: &str, message: &str, signature_hex: &str) -> bool {
+    // Parse hotkey from SS58
+    let public = match sr25519::Public::from_ss58check(hotkey_ss58) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("Invalid hotkey SS58 format: {} - {:?}", hotkey_ss58, e);
+            return false;
+        }
+    };
+
+    // Parse signature from hex
+    let signature_bytes = match hex::decode(signature_hex) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            warn!("Invalid signature hex format: {:?}", e);
+            return false;
+        }
+    };
+
+    if signature_bytes.len() != 64 {
+        warn!(
+            "Invalid signature length: {} (expected 64)",
+            signature_bytes.len()
+        );
+        return false;
+    }
+
+    // Convert to sr25519 signature
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes.copy_from_slice(&signature_bytes);
+    let signature = sr25519::Signature::from_raw(sig_bytes);
+
+    // Verify signature
+    let is_valid = sr25519::Pair::verify(&signature, message.as_bytes(), &public);
+
+    if !is_valid {
+        warn!(
+            "Signature verification failed for hotkey: {}",
+            &hotkey_ss58[..16.min(hotkey_ss58.len())]
+        );
+    }
+
+    is_valid
 }
 
 pub fn get_session(state: &AppState, token: &str) -> Option<AuthSession> {

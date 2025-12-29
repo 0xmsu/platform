@@ -9,6 +9,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use sha2::Digest;
 use sp_core::crypto::Ss58Codec;
 use std::sync::Arc;
 
@@ -84,6 +85,30 @@ pub async fn submit_agent(
                 error: Some(format!(
                     "Invalid miner_hotkey: must be a valid SS58 address (e.g., '5GrwvaEF...'). Received: {}",
                     &req.miner_hotkey[..32.min(req.miner_hotkey.len())]
+                )),
+            }),
+        ));
+    }
+
+    // Verify signature: miner must sign their source code hash to prove ownership
+    // Message format: "submit_agent:<sha256_of_source_code>"
+    let source_hash = hex::encode(sha2::Sha256::digest(req.source_code.as_bytes()));
+    let message = format!("submit_agent:{}", source_hash);
+
+    if !crate::api::auth::verify_signature(&req.miner_hotkey, &message, &req.signature) {
+        tracing::warn!(
+            "Invalid signature for submission from {}",
+            &req.miner_hotkey[..16.min(req.miner_hotkey.len())]
+        );
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(SubmitAgentResponse {
+                success: false,
+                submission_id: None,
+                agent_hash: None,
+                error: Some(format!(
+                    "Invalid signature. Message to sign: '{}'. Use sr25519 signature from your hotkey.",
+                    message
                 )),
             }),
         ));
