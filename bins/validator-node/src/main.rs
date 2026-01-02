@@ -433,13 +433,13 @@ async fn main() -> Result<()> {
     // This listens for new_submission events and triggers local evaluation
     // Also handles challenge_stopped events to stop local containers
     let ws_platform_url = args.platform_server.clone();
-    let ws_validator_hotkey = keypair.ss58_address();
+    let ws_keypair = keypair.clone();
     let ws_challenge_urls = challenge_urls.clone();
     let ws_orchestrator = orchestrator.clone();
     tokio::spawn(async move {
         start_websocket_listener(
             ws_platform_url,
-            ws_validator_hotkey,
+            ws_keypair,
             ws_challenge_urls,
             ws_orchestrator,
         )
@@ -743,19 +743,35 @@ async fn handle_block_event(
 /// Also handles challenge_stopped events to stop local containers
 pub async fn start_websocket_listener(
     platform_url: String,
-    validator_hotkey: String,
+    keypair: Keypair,
     challenge_urls: Arc<RwLock<HashMap<String, String>>>,
     orchestrator: Option<Arc<ChallengeOrchestrator>>,
 ) {
-    // Convert HTTP URL to WebSocket URL
-    let ws_url = platform_url
+    let validator_hotkey = keypair.ss58_address();
+
+    // Convert HTTP URL to WebSocket URL with authentication params
+    let base_ws_url = platform_url
         .replace("https://", "wss://")
         .replace("http://", "ws://")
         + "/ws";
 
-    info!("Starting WebSocket listener: {}", ws_url);
+    info!("Starting WebSocket listener: {}", base_ws_url);
 
     loop {
+        // Generate fresh timestamp and signature for each connection attempt
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let message = format!("ws_connect:{}:{}", validator_hotkey, timestamp);
+        let signature = hex::encode(keypair.sign_bytes(message.as_bytes()).unwrap_or_default());
+
+        let ws_url = format!(
+            "{}?hotkey={}&timestamp={}&signature={}&role=validator",
+            base_ws_url, validator_hotkey, timestamp, signature
+        );
+
         match connect_to_websocket(
             &ws_url,
             &validator_hotkey,
