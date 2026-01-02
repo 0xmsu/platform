@@ -198,10 +198,25 @@ pub struct ChallengeInfo {
 pub enum WsEvent {
     #[serde(rename = "challenge_event")]
     ChallengeEvent(ChallengeCustomEvent),
+    #[serde(rename = "challenge_stopped")]
+    ChallengeStopped(ChallengeStoppedEvent),
+    #[serde(rename = "challenge_started")]
+    ChallengeStarted(ChallengeStartedEvent),
     #[serde(rename = "ping")]
     Ping,
     #[serde(other)]
     Other,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChallengeStoppedEvent {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChallengeStartedEvent {
+    pub id: String,
+    pub endpoint: String,
 }
 
 /// Custom event from a challenge
@@ -416,11 +431,19 @@ async fn main() -> Result<()> {
 
     // Start WebSocket listener for platform-server events
     // This listens for new_submission events and triggers local evaluation
+    // Also handles challenge_stopped events to stop local containers
     let ws_platform_url = args.platform_server.clone();
     let ws_validator_hotkey = keypair.ss58_address();
     let ws_challenge_urls = challenge_urls.clone();
+    let ws_orchestrator = orchestrator.clone();
     tokio::spawn(async move {
-        start_websocket_listener(ws_platform_url, ws_validator_hotkey, ws_challenge_urls).await;
+        start_websocket_listener(
+            ws_platform_url,
+            ws_validator_hotkey,
+            ws_challenge_urls,
+            ws_orchestrator,
+        )
+        .await;
     });
 
     // RPC server
@@ -717,10 +740,12 @@ async fn handle_block_event(
 
 /// Start WebSocket listener for platform-server events
 /// Listens for challenge events and triggers evaluations
+/// Also handles challenge_stopped events to stop local containers
 pub async fn start_websocket_listener(
     platform_url: String,
     validator_hotkey: String,
     challenge_urls: Arc<RwLock<HashMap<String, String>>>,
+    orchestrator: Option<Arc<ChallengeOrchestrator>>,
 ) {
     // Convert HTTP URL to WebSocket URL
     let ws_url = platform_url
@@ -731,7 +756,14 @@ pub async fn start_websocket_listener(
     info!("Starting WebSocket listener: {}", ws_url);
 
     loop {
-        match connect_to_websocket(&ws_url, &validator_hotkey, challenge_urls.clone()).await {
+        match connect_to_websocket(
+            &ws_url,
+            &validator_hotkey,
+            challenge_urls.clone(),
+            orchestrator.clone(),
+        )
+        .await
+        {
             Ok(()) => {
                 info!("WebSocket connection closed, reconnecting in 5s...");
             }
@@ -749,6 +781,7 @@ async fn connect_to_websocket(
     ws_url: &str,
     validator_hotkey: &str,
     challenge_urls: Arc<RwLock<HashMap<String, String>>>,
+    orchestrator: Option<Arc<ChallengeOrchestrator>>,
 ) -> Result<()> {
     let (ws_stream, _) = connect_async(ws_url).await?;
     let (mut write, mut read) = ws_stream.split();
@@ -772,6 +805,32 @@ async fn connect_to_websocket(
             Ok(Message::Text(text)) => match serde_json::from_str::<WsEvent>(&text) {
                 Ok(WsEvent::ChallengeEvent(event)) => {
                     handle_challenge_event(event, validator_hotkey, challenge_urls.clone()).await;
+                }
+                Ok(WsEvent::ChallengeStopped(event)) => {
+                    info!("Received challenge_stopped event for: {}", event.id);
+                    if let Some(ref orch) = orchestrator {
+                        // Get the ChallengeId from challenge name
+                        let challenge_uuid =
+                            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, event.id.as_bytes());
+                        let challenge_id = platform_core::ChallengeId(challenge_uuid);
+                        match orch.remove_challenge(challenge_id).await {
+                            Ok(_) => info!("Challenge container stopped: {}", event.id),
+                            Err(e) => {
+                                warn!("Failed to stop challenge container {}: {}", event.id, e)
+                            }
+                        }
+                        // Remove from URL map
+                        challenge_urls.write().remove(&event.id);
+                    } else {
+                        warn!("No orchestrator available to stop challenge: {}", event.id);
+                    }
+                }
+                Ok(WsEvent::ChallengeStarted(event)) => {
+                    info!(
+                        "Received challenge_started event for: {} at {}",
+                        event.id, event.endpoint
+                    );
+                    // Could auto-start container here if needed
                 }
                 Ok(WsEvent::Ping) => {
                     debug!("Received ping from server");
