@@ -497,6 +497,8 @@ impl DockerClient {
                 "/tmp/platform-tasks:/tmp/platform-tasks:rw".to_string(), // For DinD path mapping
                 "/tmp/platform-cache:/root/.cache/term-challenge:rw".to_string(), // Cache bind mount for DinD
                 "/tmp/platform-cache:/tmp/platform-cache:rw".to_string(), // For DinD path mapping
+                "/tmp/platform-evals:/tmp/term-challenge-evals:rw".to_string(), // Eval logs for DinD
+                "/tmp/platform-evals:/tmp/platform-evals:rw".to_string(), // For DinD path mapping
                 format!("{}:/data:rw", volume_name), // Named volume for persistent state
             ]),
             ..Default::default()
@@ -537,6 +539,9 @@ impl DockerClient {
         // For Docker-in-Docker: cache directory mapping (for downloaded datasets)
         env.push("HOST_CACHE_DIR=/tmp/platform-cache".to_string());
         env.push("CACHE_DIR=/root/.cache/term-challenge".to_string());
+        // For Docker-in-Docker: eval logs directory mapping
+        env.push("HOST_BENCHMARK_RESULTS_DIR=/tmp/platform-evals".to_string());
+        env.push("BENCHMARK_RESULTS_DIR=/tmp/term-challenge-evals".to_string());
         // Pass through DEVELOPMENT_MODE for local image support
         if let Ok(dev_mode) = std::env::var("DEVELOPMENT_MODE") {
             env.push(format!("DEVELOPMENT_MODE={}", dev_mode));
