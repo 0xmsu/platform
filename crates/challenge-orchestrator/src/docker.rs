@@ -544,6 +544,10 @@ impl DockerClient {
         if let Ok(owner_hotkey) = std::env::var("OWNER_HOTKEY") {
             env.push(format!("OWNER_HOTKEY={}", owner_hotkey));
         }
+        // Pass broadcast secret for event broadcasting to platform-server
+        if let Ok(broadcast_secret) = std::env::var("BROADCAST_SECRET") {
+            env.push(format!("BROADCAST_SECRET={}", broadcast_secret));
+        }
         // Pass DATABASE_URL with challenge-specific database name
         if let Ok(db_url) = std::env::var("DATABASE_URL") {
             // Replace database name with challenge name
