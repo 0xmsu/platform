@@ -600,26 +600,33 @@ impl DockerClient {
             platform_host, broker_port
         ));
 
-        // Pass JWT token for broker authentication (if set)
-        if let Ok(jwt_secret) = std::env::var("BROKER_JWT_SECRET") {
-            // Generate a JWT token for this challenge
-            // Token includes challenge_id and validator_hotkey for authorization
-            let challenge_id = config.challenge_id.to_string();
-            let owner_id =
-                std::env::var("VALIDATOR_HOTKEY").unwrap_or_else(|_| "unknown".to_string());
+        // Pass JWT token for broker authentication
+        // Use BROKER_JWT_SECRET if set, otherwise generate a random one
+        let jwt_secret = std::env::var("BROKER_JWT_SECRET").unwrap_or_else(|_| {
+            use std::sync::OnceLock;
+            static RANDOM_SECRET: OnceLock<String> = OnceLock::new();
+            RANDOM_SECRET
+                .get_or_init(|| {
+                    let secret = uuid::Uuid::new_v4().to_string();
+                    info!("Generated random BROKER_JWT_SECRET for this session");
+                    secret
+                })
+                .clone()
+        });
 
-            // Use secure_container_runtime to generate token (3600s = 1 hour TTL)
-            if let Ok(token) = secure_container_runtime::generate_token(
-                &challenge_id,
-                &owner_id,
-                &jwt_secret,
-                3600,
-            ) {
-                env.push(format!("CONTAINER_BROKER_JWT={}", token));
-                debug!(challenge = %config.name, "Generated broker JWT token");
-            } else {
-                warn!(challenge = %config.name, "Failed to generate broker JWT token");
-            }
+        // Generate a JWT token for this challenge
+        // Token includes challenge_id and validator_hotkey for authorization
+        let challenge_id = config.challenge_id.to_string();
+        let owner_id = std::env::var("VALIDATOR_HOTKEY").unwrap_or_else(|_| "unknown".to_string());
+
+        // Use secure_container_runtime to generate token (3600s = 1 hour TTL)
+        if let Ok(token) =
+            secure_container_runtime::generate_token(&challenge_id, &owner_id, &jwt_secret, 3600)
+        {
+            env.push(format!("CONTAINER_BROKER_JWT={}", token));
+            debug!(challenge = %config.name, "Generated broker JWT token");
+        } else {
+            warn!(challenge = %config.name, "Failed to generate broker JWT token");
         }
 
         // Create container config

@@ -347,9 +347,19 @@ async fn main() -> Result<()> {
     // Container broker
     info!("Container broker on port {}...", args.broker_port);
     let broker = Arc::new(ContainerBroker::with_policy(SecurityPolicy::default()).await?);
+
+    // Use provided JWT secret or generate a random one for this session
+    let jwt_secret = args.broker_jwt_secret.clone().unwrap_or_else(|| {
+        let secret = uuid::Uuid::new_v4().to_string();
+        info!("Generated random BROKER_JWT_SECRET for this session");
+        // Set env var so challenge-orchestrator uses the same secret
+        std::env::set_var("BROKER_JWT_SECRET", &secret);
+        secret
+    });
+
     let ws_config = WsConfig {
         bind_addr: format!("0.0.0.0:{}", args.broker_port),
-        jwt_secret: args.broker_jwt_secret.clone(),
+        jwt_secret: Some(jwt_secret),
         allowed_challenges: vec![],
         max_connections_per_challenge: 10,
     };
