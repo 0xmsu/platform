@@ -2,6 +2,8 @@
 //!
 //! Runs the platform-server for challenge orchestration.
 //! Only the subnet owner should run this.
+//!
+//! Also runs the container broker for challenges to create sandboxed containers.
 
 use anyhow::Result;
 use clap::Args;
@@ -9,6 +11,7 @@ use platform_server::orchestration::ChallengeManager;
 use platform_server::state::AppState;
 use platform_server::websocket::handler::ws_handler;
 use platform_server::{api, challenge_proxy::ChallengeProxy, data_api, db, models, observability};
+use secure_container_runtime::{ContainerBroker, SecurityPolicy, WsConfig};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -56,6 +59,10 @@ pub struct ServerArgs {
     #[arg(long, default_value = "0.0.0.0", env = "HOST")]
     pub host: String,
 
+    /// Container broker WebSocket port (for challenges to create containers)
+    #[arg(long, env = "BROKER_WS_PORT", default_value = "8090")]
+    pub broker_port: u16,
+
     /// Owner hotkey (subnet owner SS58 address)
     #[arg(long, env = "OWNER_HOTKEY", default_value = DEFAULT_OWNER_HOTKEY)]
     pub owner_hotkey: String,
@@ -87,6 +94,15 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         &args.owner_hotkey[..16.min(args.owner_hotkey.len())]
     );
     info!("Listening on: {}:{}", args.host, args.port);
+    info!("Container broker on port: {}", args.broker_port);
+
+    // Start container broker for challenges
+    let broker_port = args.broker_port;
+    tokio::spawn(async move {
+        if let Err(e) = start_container_broker(broker_port).await {
+            error!("Container broker failed: {}", e);
+        }
+    });
 
     // Initialize database
     let db = db::init_db(&args.database_url).await?;
@@ -440,4 +456,48 @@ async fn proxy_to_challenge(
             StatusCode::BAD_GATEWAY.into_response()
         }
     }
+}
+
+/// Start the container broker WebSocket server
+///
+/// This allows challenges to create sandboxed containers without direct Docker access.
+async fn start_container_broker(port: u16) -> Result<()> {
+    info!("Starting container broker on port {}...", port);
+
+    // Use development policy if BROKER_DEV_MODE is set, otherwise strict
+    let policy = if std::env::var("BROKER_DEV_MODE").is_ok() {
+        info!("Container broker using development security policy");
+        SecurityPolicy::development()
+    } else {
+        info!("Container broker using default security policy");
+        SecurityPolicy::default()
+    };
+
+    let broker = Arc::new(ContainerBroker::with_policy(policy).await?);
+
+    info!("Container broker security policies:");
+    info!("  - Only whitelisted images allowed");
+    info!("  - Non-privileged containers only");
+    info!("  - Docker socket mounting blocked");
+    info!("  - Resource limits enforced");
+
+    // WebSocket config with JWT auth
+    let jwt_secret = std::env::var("BROKER_JWT_SECRET").ok();
+
+    let ws_config = WsConfig {
+        bind_addr: format!("0.0.0.0:{}", port),
+        jwt_secret,
+        allowed_challenges: vec![], // Allow all challenges
+        max_connections_per_challenge: 10,
+    };
+
+    info!(
+        "Container broker WebSocket listening on {}",
+        ws_config.bind_addr
+    );
+
+    // Run the WebSocket server (this blocks)
+    secure_container_runtime::run_ws_server(broker, ws_config).await?;
+
+    Ok(())
 }
