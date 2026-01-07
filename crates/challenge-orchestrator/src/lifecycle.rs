@@ -439,6 +439,21 @@ mod tests {
             Ok(())
         }
 
+        async fn is_container_running(&self, container_id: &str) -> anyhow::Result<bool> {
+            self.record(format!("is_running:{container_id}"));
+            Ok(true)
+        }
+
+        async fn get_logs(&self, container_id: &str, tail: usize) -> anyhow::Result<String> {
+            self.record(format!("logs:{container_id}:{tail}"));
+            Ok(String::new())
+        }
+
+        async fn list_challenge_containers(&self) -> anyhow::Result<Vec<String>> {
+            self.record("list_containers".to_string());
+            Ok(Vec::new())
+        }
+
         async fn cleanup_stale_containers(
             &self,
             prefix: &str,

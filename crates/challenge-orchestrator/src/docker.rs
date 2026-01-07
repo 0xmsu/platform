@@ -193,6 +193,9 @@ pub trait ChallengeDocker: Send + Sync {
     ) -> anyhow::Result<ChallengeInstance>;
     async fn stop_container(&self, container_id: &str) -> anyhow::Result<()>;
     async fn remove_container(&self, container_id: &str) -> anyhow::Result<()>;
+    async fn is_container_running(&self, container_id: &str) -> anyhow::Result<bool>;
+    async fn get_logs(&self, container_id: &str, tail: usize) -> anyhow::Result<String>;
+    async fn list_challenge_containers(&self) -> anyhow::Result<Vec<String>>;
     async fn cleanup_stale_containers(
         &self,
         prefix: &str,
@@ -220,6 +223,18 @@ impl ChallengeDocker for DockerClient {
 
     async fn remove_container(&self, container_id: &str) -> anyhow::Result<()> {
         DockerClient::remove_container(self, container_id).await
+    }
+
+    async fn is_container_running(&self, container_id: &str) -> anyhow::Result<bool> {
+        DockerClient::is_container_running(self, container_id).await
+    }
+
+    async fn get_logs(&self, container_id: &str, tail: usize) -> anyhow::Result<String> {
+        DockerClient::get_logs(self, container_id, tail).await
+    }
+
+    async fn list_challenge_containers(&self) -> anyhow::Result<Vec<String>> {
+        DockerClient::list_challenge_containers(self).await
     }
 
     async fn cleanup_stale_containers(
