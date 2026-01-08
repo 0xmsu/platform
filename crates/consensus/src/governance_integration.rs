@@ -490,6 +490,7 @@ impl MetagraphGovernanceSync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use platform_core::ChallengeConfig;
 
     #[test]
     fn test_sudo_action_conversion() {
@@ -502,6 +503,431 @@ mod tests {
         let action2 = SudoAction::Resume;
         let gtype2 = sudo_action_to_governance_type(&action2);
         assert_eq!(gtype2, GovernanceActionType::Resume);
+    }
+
+    #[test]
+    fn test_sudo_action_conversion_all_variants() {
+        // Test UpdateConfig
+        let action = SudoAction::UpdateConfig {
+            config: platform_core::NetworkConfig::default(),
+        };
+        assert_eq!(
+            sudo_action_to_governance_type(&action),
+            GovernanceActionType::UpdateConfig
+        );
+
+        // Test AddChallenge
+        let challenge_id = platform_core::ChallengeId::new();
+        let config = platform_core::ChallengeContainerConfig::new("test", "test:latest", 1, 0.5);
+        let action = SudoAction::AddChallenge { config };
+        assert_eq!(
+            sudo_action_to_governance_type(&action),
+            GovernanceActionType::AddChallenge
+        );
+
+        // Test UpdateChallenge
+        let config = platform_core::ChallengeContainerConfig::new("test", "test:latest", 1, 0.5);
+        let action = SudoAction::UpdateChallenge { config };
+        assert_eq!(
+            sudo_action_to_governance_type(&action),
+            GovernanceActionType::UpdateChallenge
+        );
+
+        // Test RemoveChallenge
+        let action = SudoAction::RemoveChallenge { id: challenge_id };
+        assert_eq!(
+            sudo_action_to_governance_type(&action),
+            GovernanceActionType::RemoveChallenge
+        );
+
+        // Test SetChallengeWeight
+        let action = SudoAction::SetChallengeWeight {
+            challenge_id,
+            mechanism_id: 1,
+            weight_ratio: 0.5,
+        };
+        assert_eq!(
+            sudo_action_to_governance_type(&action),
+            GovernanceActionType::SetChallengeWeight
+        );
+
+        // Test SetMechanismBurnRate
+        let action = SudoAction::SetMechanismBurnRate {
+            mechanism_id: 1,
+            burn_rate: 0.1,
+        };
+        assert_eq!(
+            sudo_action_to_governance_type(&action),
+            GovernanceActionType::SetMechanismBurnRate
+        );
+
+        // Test SetMechanismConfig
+        let action = SudoAction::SetMechanismConfig {
+            mechanism_id: 1,
+            config: platform_core::MechanismWeightConfig::new(1),
+        };
+        assert_eq!(
+            sudo_action_to_governance_type(&action),
+            GovernanceActionType::SetMechanismBurnRate
+        );
+
+        // Test SetRequiredVersion
+        let action = SudoAction::SetRequiredVersion {
+            min_version: "1.0.0".to_string(),
+            recommended_version: "1.1.0".to_string(),
+            docker_image: "image".to_string(),
+            mandatory: false,
+            deadline_block: Some(1000),
+            release_notes: None,
+        };
+        assert_eq!(
+            sudo_action_to_governance_type(&action),
+            GovernanceActionType::SetRequiredVersion
+        );
+
+        // Test AddValidator
+        let info = ValidatorInfo::new(Hotkey([1u8; 32]), Stake(1000));
+        let action = SudoAction::AddValidator { info };
+        assert_eq!(
+            sudo_action_to_governance_type(&action),
+            GovernanceActionType::AddValidator
+        );
+
+        // Test RemoveValidator
+        let action = SudoAction::RemoveValidator {
+            hotkey: Hotkey([1u8; 32]),
+        };
+        assert_eq!(
+            sudo_action_to_governance_type(&action),
+            GovernanceActionType::RemoveValidator
+        );
+
+        // Test ForceStateUpdate
+        let state = ChainState::new(Hotkey([1u8; 32]), platform_core::NetworkConfig::default());
+        let action = SudoAction::ForceStateUpdate { state };
+        assert_eq!(
+            sudo_action_to_governance_type(&action),
+            GovernanceActionType::ForceStateUpdate
+        );
+
+        // Test RefreshChallenges
+        let action = SudoAction::RefreshChallenges {
+            challenge_id: Some(challenge_id),
+        };
+        assert_eq!(
+            sudo_action_to_governance_type(&action),
+            GovernanceActionType::UpdateChallenge
+        );
+    }
+
+    #[test]
+    fn test_generate_proposal_title_all_variants() {
+        let challenge_id = platform_core::ChallengeId::new();
+
+        // UpdateConfig
+        let action = SudoAction::UpdateConfig {
+            config: platform_core::NetworkConfig::default(),
+        };
+        assert_eq!(
+            generate_proposal_title(&action),
+            "Update Network Configuration"
+        );
+
+        // AddChallenge
+        let config =
+            platform_core::ChallengeContainerConfig::new("TestChallenge", "test:latest", 1, 0.5);
+        let action = SudoAction::AddChallenge {
+            config: config.clone(),
+        };
+        assert_eq!(
+            generate_proposal_title(&action),
+            "Add Challenge: TestChallenge"
+        );
+
+        // UpdateChallenge
+        let action = SudoAction::UpdateChallenge { config };
+        assert_eq!(
+            generate_proposal_title(&action),
+            "Update Challenge: TestChallenge"
+        );
+
+        // RemoveChallenge
+        let action = SudoAction::RemoveChallenge { id: challenge_id };
+        let title = generate_proposal_title(&action);
+        assert!(title.starts_with("Remove Challenge:"));
+
+        // RefreshChallenges with ID
+        let action = SudoAction::RefreshChallenges {
+            challenge_id: Some(challenge_id),
+        };
+        let title = generate_proposal_title(&action);
+        assert!(title.starts_with("Refresh Challenge:"));
+
+        // RefreshChallenges without ID
+        let action = SudoAction::RefreshChallenges { challenge_id: None };
+        assert_eq!(generate_proposal_title(&action), "Refresh All Challenges");
+
+        // SetChallengeWeight
+        let action = SudoAction::SetChallengeWeight {
+            challenge_id,
+            mechanism_id: 1,
+            weight_ratio: 0.5,
+        };
+        let title = generate_proposal_title(&action);
+        assert!(title.starts_with("Set Weight for Challenge:"));
+
+        // SetMechanismBurnRate
+        let action = SudoAction::SetMechanismBurnRate {
+            mechanism_id: 42,
+            burn_rate: 0.1,
+        };
+        assert_eq!(
+            generate_proposal_title(&action),
+            "Set Burn Rate for Mechanism: 42"
+        );
+
+        // SetMechanismConfig
+        let action = SudoAction::SetMechanismConfig {
+            mechanism_id: 99,
+            config: platform_core::MechanismWeightConfig::new(99),
+        };
+        assert_eq!(generate_proposal_title(&action), "Configure Mechanism: 99");
+
+        // SetRequiredVersion
+        let action = SudoAction::SetRequiredVersion {
+            min_version: "2.0.0".to_string(),
+            recommended_version: "2.1.0".to_string(),
+            docker_image: "image".to_string(),
+            mandatory: true,
+            deadline_block: Some(1000),
+            release_notes: None,
+        };
+        assert_eq!(
+            generate_proposal_title(&action),
+            "Set Required Version: 2.0.0"
+        );
+
+        // AddValidator
+        let hotkey = Hotkey([42u8; 32]);
+        let info = ValidatorInfo::new(hotkey.clone(), Stake(1000));
+        let action = SudoAction::AddValidator { info };
+        let title = generate_proposal_title(&action);
+        assert!(title.starts_with("Add Validator:"));
+
+        // RemoveValidator
+        let action = SudoAction::RemoveValidator { hotkey };
+        let title = generate_proposal_title(&action);
+        assert!(title.starts_with("Remove Validator:"));
+
+        // EmergencyPause
+        let action = SudoAction::EmergencyPause {
+            reason: "Critical bug".to_string(),
+        };
+        assert_eq!(
+            generate_proposal_title(&action),
+            "Emergency Pause: Critical bug"
+        );
+
+        // Resume
+        let action = SudoAction::Resume;
+        assert_eq!(generate_proposal_title(&action), "Resume Network");
+
+        // ForceStateUpdate
+        let state = ChainState::new(Hotkey([1u8; 32]), platform_core::NetworkConfig::default());
+        let action = SudoAction::ForceStateUpdate { state };
+        assert_eq!(
+            generate_proposal_title(&action),
+            "Force State Update (Emergency)"
+        );
+    }
+
+    #[test]
+    fn test_generate_proposal_description() {
+        let challenge_id = platform_core::ChallengeId::new();
+
+        // AddChallenge
+        let config = platform_core::ChallengeContainerConfig::new(
+            "TestChallenge",
+            "test/image:latest",
+            1,
+            0.25,
+        );
+        let action = SudoAction::AddChallenge {
+            config: config.clone(),
+        };
+        let desc = generate_proposal_description(&action);
+        assert!(desc.contains("TestChallenge"));
+        assert!(desc.contains("test/image:latest"));
+        assert!(desc.contains("25%"));
+
+        // UpdateChallenge
+        let action = SudoAction::UpdateChallenge { config };
+        let desc = generate_proposal_description(&action);
+        assert!(desc.contains("TestChallenge"));
+        assert!(desc.contains("test/image:latest"));
+
+        // SetRequiredVersion
+        let action = SudoAction::SetRequiredVersion {
+            min_version: "1.5.0".to_string(),
+            recommended_version: "1.6.0".to_string(),
+            docker_image: "image".to_string(),
+            mandatory: true,
+            deadline_block: Some(1000),
+            release_notes: None,
+        };
+        let desc = generate_proposal_description(&action);
+        assert!(desc.contains("1.5.0"));
+        assert!(desc.contains("true"));
+
+        // EmergencyPause
+        let action = SudoAction::EmergencyPause {
+            reason: "Security vulnerability".to_string(),
+        };
+        let desc = generate_proposal_description(&action);
+        assert!(desc.contains("Security vulnerability"));
+
+        // Other actions return default description
+        let action = SudoAction::Resume;
+        let desc = generate_proposal_description(&action);
+        assert_eq!(desc, "No additional description available.");
+    }
+
+    #[test]
+    fn test_apply_sudo_action_all_variants() {
+        let keypair = Keypair::generate();
+        let mut state = ChainState::new(keypair.hotkey(), platform_core::NetworkConfig::default());
+
+        // Test UpdateConfig
+        let new_config = platform_core::NetworkConfig::default();
+        let action = SudoAction::UpdateConfig {
+            config: new_config.clone(),
+        };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+        assert_eq!(state.config.subnet_id, new_config.subnet_id);
+
+        // Test AddChallenge
+        let config = platform_core::ChallengeContainerConfig::new(
+            "test",
+            "ghcr.io/platformnetwork/test:latest",
+            1,
+            0.5,
+        );
+        let challenge_id = config.challenge_id;
+        let action = SudoAction::AddChallenge {
+            config: config.clone(),
+        };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+        assert!(state.challenge_configs.contains_key(&challenge_id));
+
+        // Test UpdateChallenge
+        let mut updated_config = platform_core::ChallengeContainerConfig::new(
+            "test",
+            "ghcr.io/platformnetwork/updated:latest",
+            1,
+            0.5,
+        );
+        updated_config.challenge_id = challenge_id; // Use same ID for update
+        let action = SudoAction::UpdateChallenge {
+            config: updated_config.clone(),
+        };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+        assert_eq!(
+            state.challenge_configs[&challenge_id].docker_image,
+            "ghcr.io/platformnetwork/updated:latest"
+        );
+
+        // Test RemoveChallenge
+        let action = SudoAction::RemoveChallenge { id: challenge_id };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+        assert!(!state.challenge_configs.contains_key(&challenge_id));
+
+        // Test SetChallengeWeight
+        let action = SudoAction::SetChallengeWeight {
+            challenge_id,
+            mechanism_id: 1,
+            weight_ratio: 0.75,
+        };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+        assert!(state.challenge_weights.contains_key(&challenge_id));
+
+        // Test SetMechanismBurnRate
+        let action = SudoAction::SetMechanismBurnRate {
+            mechanism_id: 1,
+            burn_rate: 0.15,
+        };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+        assert_eq!(state.mechanism_configs[&1].base_burn_rate, 0.15);
+
+        // Test SetMechanismConfig
+        let mut mechanism_config = platform_core::MechanismWeightConfig::new(2);
+        mechanism_config.base_burn_rate = 0.2;
+        mechanism_config.max_weight_cap = 0.5;
+        let action = SudoAction::SetMechanismConfig {
+            mechanism_id: 2,
+            config: mechanism_config.clone(),
+        };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+        assert_eq!(state.mechanism_configs[&2].base_burn_rate, 0.2);
+        assert_eq!(state.mechanism_configs[&2].max_weight_cap, 0.5);
+
+        // Test SetRequiredVersion
+        let action = SudoAction::SetRequiredVersion {
+            min_version: "1.0.0".to_string(),
+            recommended_version: "1.1.0".to_string(),
+            docker_image: "validator:1.1.0".to_string(),
+            mandatory: true,
+            deadline_block: Some(10000),
+            release_notes: Some("Important update".to_string()),
+        };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+        assert!(state.required_version.is_some());
+        let req_ver = state.required_version.as_ref().unwrap();
+        assert_eq!(req_ver.min_version, "1.0.0");
+        assert!(req_ver.mandatory);
+
+        // Test AddValidator
+        let new_validator = ValidatorInfo::new(Hotkey([99u8; 32]), Stake(500_000_000_000));
+        let action = SudoAction::AddValidator {
+            info: new_validator.clone(),
+        };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+        assert!(state.get_validator(&new_validator.hotkey).is_some());
+
+        // Test RemoveValidator
+        let action = SudoAction::RemoveValidator {
+            hotkey: new_validator.hotkey.clone(),
+        };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+        assert!(state.get_validator(&new_validator.hotkey).is_none());
+
+        // Test EmergencyPause
+        let action = SudoAction::EmergencyPause {
+            reason: "Test pause".to_string(),
+        };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+
+        // Test Resume
+        let action = SudoAction::Resume;
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+
+        // Test ForceStateUpdate
+        let new_state =
+            ChainState::new(Hotkey([88u8; 32]), platform_core::NetworkConfig::default());
+        let action = SudoAction::ForceStateUpdate {
+            state: new_state.clone(),
+        };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+        assert_eq!(state.sudo_key, Hotkey([88u8; 32]));
+
+        // Test RefreshChallenges with ID
+        let action = SudoAction::RefreshChallenges {
+            challenge_id: Some(challenge_id),
+        };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
+
+        // Test RefreshChallenges without ID
+        let action = SudoAction::RefreshChallenges { challenge_id: None };
+        assert!(apply_sudo_action(&mut state, &action).is_ok());
     }
 
     #[test]

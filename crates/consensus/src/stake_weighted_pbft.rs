@@ -912,4 +912,259 @@ mod tests {
         assert!(matches!(msg1.message, NetworkMessage::Proposal(_)));
         assert!(matches!(msg2.message, NetworkMessage::Vote(_)));
     }
+
+    #[tokio::test]
+    async fn test_handle_proposal_wrong_signer() {
+        let (engine, _rx) = create_test_engine();
+        let other_key = Keypair::generate().hotkey();
+
+        let action = SudoAction::UpdateConfig {
+            config: NetworkConfig::default(),
+        };
+        let proposal = Proposal::new(ProposalAction::Sudo(action), other_key.clone(), 0);
+
+        let result = engine
+            .handle_proposal(proposal, &engine.keypair.hotkey())
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_proposal_non_sudo() {
+        let (engine, _rx) = create_test_engine();
+        let non_sudo = Keypair::generate();
+
+        let action = SudoAction::UpdateConfig {
+            config: NetworkConfig::default(),
+        };
+        let proposal = Proposal::new(ProposalAction::Sudo(action), non_sudo.hotkey(), 0);
+
+        let result = engine.handle_proposal(proposal, &non_sudo.hotkey()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_proposal_invalid_config() {
+        let (engine, _rx) = create_test_engine();
+        let sudo_key = engine.keypair.hotkey();
+
+        let config = platform_core::ChallengeContainerConfig::new("", "", 1, 0.5);
+
+        let action = SudoAction::AddChallenge { config };
+        let proposal = Proposal::new(ProposalAction::Sudo(action), sudo_key.clone(), 0);
+
+        let result = engine.handle_proposal(proposal, &sudo_key).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_vote_non_validator() {
+        let (engine, _rx) = create_test_engine();
+        let non_validator = Keypair::generate();
+
+        let proposal_id = uuid::Uuid::new_v4();
+        let vote = Vote::approve(proposal_id, non_validator.hotkey());
+
+        let result = engine.handle_vote(vote, &non_validator.hotkey()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_apply_proposal_new_block() {
+        let (engine, _rx) = create_test_engine();
+
+        let state_hash = {
+            let state = engine.chain_state.read();
+            state.state_hash
+        };
+
+        let proposal = Proposal::new(
+            ProposalAction::NewBlock { state_hash },
+            engine.keypair.hotkey(),
+            0,
+        );
+
+        let result = engine.apply_proposal(proposal).await;
+        assert!(result.is_ok());
+
+        let block = engine.chain_state.read().block_height;
+        assert_eq!(block, 1);
+    }
+
+    #[tokio::test]
+    async fn test_apply_proposal_job_completion() {
+        let (engine, _rx) = create_test_engine();
+
+        let proposal = Proposal::new(
+            ProposalAction::JobCompletion {
+                job_id: uuid::Uuid::new_v4(),
+                result: platform_core::Score::new(0.75, 1.0),
+                validator: engine.keypair.hotkey(),
+            },
+            engine.keypair.hotkey(),
+            0,
+        );
+
+        let result = engine.apply_proposal(proposal).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_apply_sudo_action_all_variants() {
+        let (engine, _rx) = create_test_engine();
+        let challenge_id = platform_core::ChallengeId::new();
+
+        // Test SetChallengeWeight
+        let action = SudoAction::SetChallengeWeight {
+            challenge_id,
+            mechanism_id: 1,
+            weight_ratio: 0.5,
+        };
+        let mut state = engine.chain_state.write();
+        assert!(engine.apply_sudo_action(&mut state, action).is_ok());
+        drop(state);
+
+        // Test SetMechanismBurnRate
+        let action = SudoAction::SetMechanismBurnRate {
+            mechanism_id: 1,
+            burn_rate: 0.2,
+        };
+        let mut state = engine.chain_state.write();
+        assert!(engine.apply_sudo_action(&mut state, action).is_ok());
+        drop(state);
+
+        // Test SetMechanismConfig
+        let action = SudoAction::SetMechanismConfig {
+            mechanism_id: 2,
+            config: platform_core::MechanismWeightConfig::new(2),
+        };
+        let mut state = engine.chain_state.write();
+        assert!(engine.apply_sudo_action(&mut state, action).is_ok());
+        drop(state);
+
+        // Test EmergencyPause
+        let action = SudoAction::EmergencyPause {
+            reason: "Test".to_string(),
+        };
+        let mut state = engine.chain_state.write();
+        assert!(engine.apply_sudo_action(&mut state, action).is_ok());
+        drop(state);
+
+        // Test Resume
+        let action = SudoAction::Resume;
+        let mut state = engine.chain_state.write();
+        assert!(engine.apply_sudo_action(&mut state, action).is_ok());
+        drop(state);
+
+        // Test ForceStateUpdate
+        let new_state = ChainState::new(Hotkey([99u8; 32]), NetworkConfig::default());
+        let action = SudoAction::ForceStateUpdate {
+            state: new_state.clone(),
+        };
+        let mut state = engine.chain_state.write();
+        assert!(engine.apply_sudo_action(&mut state, action).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_sudo_action() {
+        let (engine, _rx) = create_test_engine();
+        let state = engine.chain_state.read();
+
+        // Valid challenge
+        let config = platform_core::ChallengeContainerConfig::new(
+            "Valid",
+            "ghcr.io/platformnetwork/valid:latest",
+            1,
+            0.5,
+        );
+        let action = SudoAction::AddChallenge { config };
+        assert!(engine.validate_sudo_action(&state, &action));
+
+        // Invalid challenge (empty name)
+        let invalid_config = platform_core::ChallengeContainerConfig::new("", "", 1, 0.5);
+        let action = SudoAction::AddChallenge {
+            config: invalid_config,
+        };
+        assert!(!engine.validate_sudo_action(&state, &action));
+
+        // Other actions validate true
+        let action = SudoAction::Resume;
+        assert!(engine.validate_sudo_action(&state, &action));
+    }
+
+    #[tokio::test]
+    async fn test_validate_proposal() {
+        let (engine, _rx) = create_test_engine();
+
+        // Valid proposal
+        let proposal = Proposal::new(
+            ProposalAction::NewBlock {
+                state_hash: [0u8; 32],
+            },
+            engine.keypair.hotkey(),
+            0,
+        );
+        assert!(engine.validate_proposal(&proposal));
+
+        // Invalid block height
+        let proposal = Proposal::new(
+            ProposalAction::NewBlock {
+                state_hash: [0u8; 32],
+            },
+            engine.keypair.hotkey(),
+            100,
+        );
+        assert!(!engine.validate_proposal(&proposal));
+
+        // Non-sudo proposing sudo action
+        let non_sudo = Keypair::generate();
+        let action = SudoAction::UpdateConfig {
+            config: NetworkConfig::default(),
+        };
+        let proposal = Proposal::new(ProposalAction::Sudo(action), non_sudo.hotkey(), 0);
+        assert!(!engine.validate_proposal(&proposal));
+    }
+
+    #[tokio::test]
+    async fn test_check_timeouts() {
+        let (engine, _rx) = create_test_engine();
+
+        let proposal = Proposal::new(
+            ProposalAction::NewBlock {
+                state_hash: [0u8; 32],
+            },
+            engine.keypair.hotkey(),
+            0,
+        );
+        engine.start_round(proposal);
+
+        let timeouts = engine.check_timeouts();
+        // Just verify it doesn't panic
+        assert_eq!(timeouts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_consensus_threshold() {
+        let (engine, _rx) = create_test_engine();
+
+        // Add validators with specific stakes
+        {
+            let mut state = engine.chain_state.write();
+            let v1 = Keypair::generate();
+            let v2 = Keypair::generate();
+            state
+                .add_validator(ValidatorInfo::new(v1.hotkey(), Stake::new(300_000_000_000)))
+                .unwrap();
+            state
+                .add_validator(ValidatorInfo::new(v2.hotkey(), Stake::new(700_000_000_000)))
+                .unwrap();
+        }
+
+        let total = engine.total_stake();
+        assert_eq!(total, 1_000_000_000_000);
+
+        let status = engine.status();
+        // Threshold is total/2 + 1 = 500_000_000_001
+        assert_eq!(status.threshold_stake, 500_000_000_001);
+    }
 }

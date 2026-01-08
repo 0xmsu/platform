@@ -226,4 +226,66 @@ mod tests {
 
         panic!("Should have been rejected");
     }
+
+    #[test]
+    fn test_completed_results() {
+        let state = ConsensusState::new(ConsensusConfig::default());
+        state.set_validator_count(4);
+
+        let proposer = Keypair::generate();
+        let proposal = Proposal::new(
+            ProposalAction::NewBlock {
+                state_hash: [0u8; 32],
+            },
+            proposer.hotkey(),
+            1,
+        );
+
+        let proposal_id = state.start_round(proposal);
+
+        // Add votes to reach consensus
+        for _ in 0..3 {
+            let voter = Keypair::generate();
+            let vote = Vote::approve(proposal_id, voter.hotkey());
+            state.add_vote(vote);
+        }
+
+        // Check completed results
+        let completed = state.completed_results();
+        assert_eq!(completed.len(), 1);
+        assert!(matches!(completed[0], ConsensusResult::Approved(_)));
+    }
+
+    #[test]
+    fn test_clear_completed() {
+        let state = ConsensusState::new(ConsensusConfig::default());
+        state.set_validator_count(4);
+
+        let proposer = Keypair::generate();
+        let proposal = Proposal::new(
+            ProposalAction::NewBlock {
+                state_hash: [0u8; 32],
+            },
+            proposer.hotkey(),
+            1,
+        );
+
+        let proposal_id = state.start_round(proposal);
+
+        // Add votes to reach consensus
+        for _ in 0..3 {
+            let voter = Keypair::generate();
+            let vote = Vote::approve(proposal_id, voter.hotkey());
+            state.add_vote(vote);
+        }
+
+        // Verify we have completed results
+        assert_eq!(state.completed_results().len(), 1);
+
+        // Clear completed
+        state.clear_completed();
+
+        // Verify cleared
+        assert_eq!(state.completed_results().len(), 0);
+    }
 }
