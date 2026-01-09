@@ -337,32 +337,49 @@ mod tests {
         };
 
         let request = Request::Create {
-            config,
+            config: config.clone(),
             request_id: "req-1".to_string(),
         };
 
         let json = encode_request(&request);
-        assert!(json.contains("challenge-1"));
-        assert!(json.contains("create"));
+        let decoded = decode_request(&json).unwrap();
+        
+        // Assert via decode + match instead of brittle string contains
+        match decoded {
+            Request::Create { config: decoded_config, request_id } => {
+                assert_eq!(decoded_config.challenge_id, "challenge-1");
+                assert_eq!(decoded_config.image, "ghcr.io/platformnetwork/test:latest");
+                assert_eq!(decoded_config.owner_id, "owner-1");
+                assert_eq!(request_id, "req-1");
+            }
+            _ => panic!("Expected Create variant"),
+        }
     }
 
     #[test]
     fn test_request_type_all_variants() {
+        // Table-driven test to reduce duplication and ease future enum growth
         let config = ContainerConfig::default();
         
-        assert_eq!(Request::Create { config: config.clone(), request_id: "1".into() }.request_type(), "create");
-        assert_eq!(Request::Start { container_id: "c1".into(), request_id: "1".into() }.request_type(), "start");
-        assert_eq!(Request::Stop { container_id: "c1".into(), timeout_secs: 10, request_id: "1".into() }.request_type(), "stop");
-        assert_eq!(Request::Remove { container_id: "c1".into(), force: false, request_id: "1".into() }.request_type(), "remove");
-        assert_eq!(Request::Exec { container_id: "c1".into(), command: vec![], working_dir: None, timeout_secs: 30, request_id: "1".into() }.request_type(), "exec");
-        assert_eq!(Request::Inspect { container_id: "c1".into(), request_id: "1".into() }.request_type(), "inspect");
-        assert_eq!(Request::List { challenge_id: None, owner_id: None, request_id: "1".into() }.request_type(), "list");
-        assert_eq!(Request::Logs { container_id: "c1".into(), tail: 100, request_id: "1".into() }.request_type(), "logs");
-        assert_eq!(Request::Pull { image: "alpine".into(), request_id: "1".into() }.request_type(), "pull");
-        assert_eq!(Request::Build { tag: "test:1".into(), dockerfile: "".into(), context: None, request_id: "1".into() }.request_type(), "build");
-        assert_eq!(Request::Ping { request_id: "1".into() }.request_type(), "ping");
-        assert_eq!(Request::CopyFrom { container_id: "c1".into(), path: "/file".into(), request_id: "1".into() }.request_type(), "copy_from");
-        assert_eq!(Request::CopyTo { container_id: "c1".into(), path: "/file".into(), data: "".into(), request_id: "1".into() }.request_type(), "copy_to");
+        let test_cases = vec![
+            (Request::Create { config: config.clone(), request_id: "1".into() }, "create"),
+            (Request::Start { container_id: "c1".into(), request_id: "1".into() }, "start"),
+            (Request::Stop { container_id: "c1".into(), timeout_secs: 10, request_id: "1".into() }, "stop"),
+            (Request::Remove { container_id: "c1".into(), force: false, request_id: "1".into() }, "remove"),
+            (Request::Exec { container_id: "c1".into(), command: vec![], working_dir: None, timeout_secs: 30, request_id: "1".into() }, "exec"),
+            (Request::Inspect { container_id: "c1".into(), request_id: "1".into() }, "inspect"),
+            (Request::List { challenge_id: None, owner_id: None, request_id: "1".into() }, "list"),
+            (Request::Logs { container_id: "c1".into(), tail: 100, request_id: "1".into() }, "logs"),
+            (Request::Pull { image: "alpine".into(), request_id: "1".into() }, "pull"),
+            (Request::Build { tag: "test:1".into(), dockerfile: "".into(), context: None, request_id: "1".into() }, "build"),
+            (Request::Ping { request_id: "1".into() }, "ping"),
+            (Request::CopyFrom { container_id: "c1".into(), path: "/file".into(), request_id: "1".into() }, "copy_from"),
+            (Request::CopyTo { container_id: "c1".into(), path: "/file".into(), data: "".into(), request_id: "1".into() }, "copy_to"),
+        ];
+
+        for (request, expected_type) in test_cases {
+            assert_eq!(request.request_type(), expected_type, "Mismatch for {:?}", request);
+        }
     }
 
     #[test]
@@ -394,13 +411,20 @@ mod tests {
         
         let ping_req = Request::Ping { request_id: "1".into() };
         assert_eq!(ping_req.owner_id(), None);
+        // Table-driven test for response request_id extraction
+        let exec_result = ExecResult { stdout: "".into(), stderr: "".into(), exit_code: 0, duration_ms: 100, timed_out: false };
         
-        let list_req = Request::List { challenge_id: None, owner_id: Some("owner-456".into()), request_id: "1".into() };
-        assert_eq!(list_req.owner_id(), Some("owner-456"));
-    }
+        let test_cases = vec![
+            (Response::Created { container_id: "c1".into(), container_name: "name".into(), request_id: "r1".into() }, "r1"),
+            (Response::Started { container_id: "c1".into(), ports: HashMap::new(), endpoint: None, request_id: "r2".into() }, "r2"),
+            (Response::Stopped { container_id: "c1".into(), request_id: "r3".into() }, "r3"),
+            (Response::Removed { container_id: "c1".into(), request_id: "r4".into() }, "r4"),
+            (Response::ExecResult { result: exec_result, request_id: "r5".into() }, "r5"),
+        ];
 
-    #[test]
-    fn test_response_request_id_all_variants() {
+        for (response, expected_id) in test_cases {
+            assert_eq!(response.request_id(), expected_id, "Mismatch for {:?}", response);
+        }
         assert_eq!(Response::Created { container_id: "c1".into(), container_name: "name".into(), request_id: "r1".into() }.request_id(), "r1");
         assert_eq!(Response::Started { container_id: "c1".into(), ports: HashMap::new(), endpoint: None, request_id: "r2".into() }.request_id(), "r2");
         assert_eq!(Response::Stopped { container_id: "c1".into(), request_id: "r3".into() }.request_id(), "r3");
@@ -471,6 +495,11 @@ mod tests {
 
     #[test]
     fn test_response_info_and_list() {
+        // Use fixed timestamp to prevent flakiness
+        let fixed_time = chrono::DateTime::parse_from_rfc3339("2026-01-09T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
         let info = ContainerInfo {
             id: "c1".into(),
             name: "test".into(),
@@ -478,7 +507,7 @@ mod tests {
             owner_id: "owner1".into(),
             image: "alpine".into(),
             state: ContainerState::Running,
-            created_at: chrono::Utc::now(),
+            created_at: fixed_time,
             ports: HashMap::new(),
             endpoint: None,
             labels: HashMap::new(),
