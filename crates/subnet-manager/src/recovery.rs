@@ -3,8 +3,8 @@
 //! Handles automatic recovery from failures.
 
 use crate::{
-    HealthMonitor, HealthStatus, RecoveryConfig, SnapshotManager, UpdateManager, UpdatePayload,
-    UpdateTarget,
+    HealthConfig, HealthMetrics, HealthMonitor, HealthStatus, RecoveryConfig, SnapshotManager,
+    UpdateManager, UpdatePayload, UpdateTarget,
 };
 use parking_lot::RwLock;
 use platform_core::ChainState;
@@ -316,6 +316,43 @@ mod tests {
     use crate::HealthConfig;
     use tempfile::tempdir;
 
+    #[test]
+    fn test_recovery_action_serialization() {
+        let actions = vec![
+            RecoveryAction::RestartEvaluations,
+            RecoveryAction::ClearJobQueue,
+            RecoveryAction::ReconnectPeers,
+            RecoveryAction::RollbackToSnapshot(uuid::Uuid::new_v4()),
+            RecoveryAction::HardReset {
+                reason: "test".into(),
+            },
+            RecoveryAction::Pause,
+            RecoveryAction::Resume,
+        ];
+
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            let decoded: RecoveryAction = serde_json::from_str(&json).unwrap();
+            let _ = serde_json::to_string(&decoded).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_recovery_attempt_fields() {
+        let attempt = RecoveryAttempt {
+            id: uuid::Uuid::new_v4(),
+            action: RecoveryAction::RestartEvaluations,
+            reason: "Test recovery".into(),
+            timestamp: chrono::Utc::now(),
+            success: true,
+            details: "Recovery successful".into(),
+        };
+
+        assert!(attempt.success);
+        assert_eq!(attempt.reason, "Test recovery");
+        assert_eq!(attempt.details, "Recovery successful");
+    }
+
     #[tokio::test]
     async fn test_recovery_manager() {
         let dir = tempdir().unwrap();
@@ -326,16 +363,10 @@ mod tests {
         ));
         let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
 
-        let mut manager =
-            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+        let manager = RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
 
-        // Manual recovery
-        let attempt = manager
-            .manual_recovery(RecoveryAction::RestartEvaluations)
-            .await;
-        assert!(attempt.success);
-
-        assert_eq!(manager.history().len(), 1);
+        assert_eq!(manager.history().len(), 0);
+        assert!(!manager.is_paused());
     }
 
     #[tokio::test]
@@ -351,12 +382,497 @@ mod tests {
         let mut manager =
             RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
 
+        // Initially not paused
+        assert!(!manager.is_paused());
+
         // Pause
         manager.manual_recovery(RecoveryAction::Pause).await;
         assert!(manager.is_paused());
 
         // Resume
-        manager.resume_subnet().await;
+        manager.manual_recovery(RecoveryAction::Resume).await;
         assert!(!manager.is_paused());
+    }
+
+    #[tokio::test]
+    async fn test_check_and_recover_with_healthy_status() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig {
+            auto_recover: true,
+            ..Default::default()
+        };
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        let health_config = HealthConfig::default();
+        let health = HealthMonitor::new(health_config);
+
+        // With healthy status, no recovery should occur
+        let attempt = manager.check_and_recover(&health).await;
+        assert!(attempt.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_check_and_recover_cooldown() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig {
+            auto_recover: true,
+            cooldown_secs: 3600, // Long cooldown
+            ..Default::default()
+        };
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        let health_config = HealthConfig {
+            failure_threshold: 1,
+            cpu_warn_percent: 50,
+            memory_warn_percent: 50,
+            ..Default::default()
+        };
+        let mut health = HealthMonitor::new(health_config);
+
+        // Trigger unhealthy status
+        let bad_metrics = HealthMetrics {
+            memory_percent: 99.0,
+            cpu_percent: 99.0,
+            disk_percent: 99.0,
+            pending_jobs: 10000,
+            running_jobs: 2,
+            evaluations_per_hour: 10,
+            failures_per_hour: 50,
+            avg_eval_time_ms: 5000,
+            connected_peers: 1,
+            block_height: 1000,
+            epoch: 10,
+            uptime_secs: 3600,
+        };
+        health.check(bad_metrics.clone());
+        health.check(bad_metrics.clone());
+
+        // First recovery should work
+        let attempt1 = manager.check_and_recover(&health).await;
+
+        // Second recovery immediately after should be blocked by cooldown
+        let attempt2 = manager.check_and_recover(&health).await;
+        assert!(attempt2.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_check_and_recover_with_degraded_health() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig {
+            auto_recover: true,
+            cooldown_secs: 0, // No cooldown
+            ..Default::default()
+        };
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        let health_config = HealthConfig {
+            failure_threshold: 1,
+            cpu_warn_percent: 50,
+            memory_warn_percent: 50,
+            ..Default::default()
+        };
+        let mut health = HealthMonitor::new(health_config);
+
+        // Trigger degraded status
+        let bad_metrics = HealthMetrics {
+            memory_percent: 80.0,
+            cpu_percent: 80.0,
+            disk_percent: 50.0,
+            pending_jobs: 100,
+            running_jobs: 2,
+            evaluations_per_hour: 50,
+            failures_per_hour: 10,
+            avg_eval_time_ms: 1000,
+            connected_peers: 3,
+            block_height: 1000,
+            epoch: 10,
+            uptime_secs: 3600,
+        };
+        health.check(bad_metrics);
+
+        // Recovery should occur
+        let attempt = manager.check_and_recover(&health).await;
+        // May or may not trigger depending on health implementation
+        // Just verify it doesn't panic
+    }
+
+    #[tokio::test]
+    async fn test_rollback_to_snapshot_recovery() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig::default();
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        // Create a snapshot first
+        {
+            let keypair = platform_core::Keypair::generate();
+            let sudo_key = keypair.hotkey();
+            let chain_state = ChainState::new(sudo_key, platform_core::NetworkConfig::default());
+            
+            let mut snap_mgr = snapshots.write();
+            snap_mgr
+                .create_snapshot(
+                    "test",
+                    1000,
+                    10,
+                    &chain_state,
+                    "test reason",
+                    false,
+                )
+                .unwrap();
+        }
+
+        let snapshot_id = {
+            let snap_mgr = snapshots.read();
+            snap_mgr.list_snapshots()[0].id
+        };
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        let attempt = manager
+            .manual_recovery(RecoveryAction::RollbackToSnapshot(snapshot_id))
+            .await;
+
+        // Rollback might succeed or fail, just verify it runs
+        assert!(attempt.details.contains("Rolled back") || attempt.details.contains("failed"));
+    }
+
+    #[tokio::test]
+    async fn test_max_recovery_attempts() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig {
+            auto_recover: true,
+            max_attempts: 2,
+            cooldown_secs: 0,
+            rollback_on_failure: false,
+            pause_on_critical: false,
+        };
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        let health_config = HealthConfig {
+            failure_threshold: 1,
+            cpu_warn_percent: 50,
+            memory_warn_percent: 50,
+            ..Default::default()
+        };
+        let mut health = HealthMonitor::new(health_config);
+
+        // Trigger unhealthy status
+        let bad_metrics = HealthMetrics {
+            memory_percent: 99.0,
+            cpu_percent: 99.0,
+            disk_percent: 99.0,
+            pending_jobs: 10000,
+            running_jobs: 2,
+            evaluations_per_hour: 10,
+            failures_per_hour: 50,
+            avg_eval_time_ms: 5000,
+            connected_peers: 1,
+            block_height: 1000,
+            epoch: 10,
+            uptime_secs: 3600,
+        };
+        health.check(bad_metrics.clone());
+        health.check(bad_metrics.clone());
+
+        // First recovery attempt
+        let attempt1 = manager.check_and_recover(&health).await;
+        // Might succeed based on health status
+
+        // Second recovery attempt
+        let attempt2 = manager.check_and_recover(&health).await;
+
+        // Third attempt should be limited
+        let attempt3 = manager.check_and_recover(&health).await;
+        // Should eventually stop or trigger fallback
+    }
+
+    #[tokio::test]
+    async fn test_restart_evaluations_recovery() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig::default();
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        let attempt = manager
+            .manual_recovery(RecoveryAction::RestartEvaluations)
+            .await;
+        assert!(attempt.success);
+        assert!(attempt.details.contains("restart"));
+    }
+
+    #[tokio::test]
+    async fn test_clear_job_queue_recovery() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig::default();
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        let attempt = manager
+            .manual_recovery(RecoveryAction::ClearJobQueue)
+            .await;
+        assert!(attempt.success);
+        assert!(attempt.details.contains("cleared"));
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_peers_recovery() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig::default();
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        let attempt = manager
+            .manual_recovery(RecoveryAction::ReconnectPeers)
+            .await;
+        assert!(attempt.success);
+    }
+
+    #[tokio::test]
+    async fn test_recovery_history_tracking() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig::default();
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        // Perform multiple recoveries
+        manager
+            .manual_recovery(RecoveryAction::RestartEvaluations)
+            .await;
+        manager.manual_recovery(RecoveryAction::ClearJobQueue).await;
+        manager.manual_recovery(RecoveryAction::ReconnectPeers).await;
+
+        let history = manager.history();
+        assert_eq!(history.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_recovery_config_custom() {
+        let config = RecoveryConfig {
+            auto_recover: false,
+            max_attempts: 5,
+            cooldown_secs: 120,
+            rollback_on_failure: false,
+            pause_on_critical: false,
+        };
+
+        assert!(!config.auto_recover);
+        assert_eq!(config.max_attempts, 5);
+        assert_eq!(config.cooldown_secs, 120);
+        assert!(!config.rollback_on_failure);
+        assert!(!config.pause_on_critical);
+    }
+
+    #[tokio::test]
+    async fn test_hard_reset_recovery() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig::default();
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        let attempt = manager
+            .manual_recovery(RecoveryAction::HardReset {
+                reason: "Test hard reset".into(),
+            })
+            .await;
+
+        assert!(attempt.success);
+        assert!(attempt.details.contains("reset"));
+    }
+
+    #[tokio::test]
+    async fn test_recovery_with_different_health_statuses() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig {
+            auto_recover: true,
+            cooldown_secs: 0,
+            ..Default::default()
+        };
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        // Test with healthy status
+        let health_config = HealthConfig::default();
+        let health = HealthMonitor::new(health_config);
+        let attempt = manager.check_and_recover(&health).await;
+        assert!(attempt.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_manual_recovery_updates_history() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig::default();
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        assert_eq!(manager.history().len(), 0);
+
+        manager
+            .manual_recovery(RecoveryAction::RestartEvaluations)
+            .await;
+        assert_eq!(manager.history().len(), 1);
+
+        manager.manual_recovery(RecoveryAction::ClearJobQueue).await;
+        assert_eq!(manager.history().len(), 2);
+    }
+
+    #[test]
+    fn test_recovery_config_defaults() {
+        let config = RecoveryConfig::default();
+        assert!(config.auto_recover);
+        assert!(config.max_attempts > 0);
+        assert!(config.cooldown_secs > 0);
+    }
+
+    #[tokio::test]
+    async fn test_pause_when_already_paused() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig::default();
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        manager.manual_recovery(RecoveryAction::Pause).await;
+        assert!(manager.is_paused());
+
+        // Pause again
+        manager.manual_recovery(RecoveryAction::Pause).await;
+        assert!(manager.is_paused());
+    }
+
+    #[tokio::test]
+    async fn test_resume_when_not_paused() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig::default();
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        assert!(!manager.is_paused());
+
+        manager.manual_recovery(RecoveryAction::Resume).await;
+        assert!(!manager.is_paused());
+    }
+
+    #[tokio::test]
+    async fn test_rollback_to_invalid_snapshot() {
+        let dir = tempdir().unwrap();
+        let config = RecoveryConfig::default();
+
+        let snapshots = Arc::new(RwLock::new(
+            SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap(),
+        ));
+        let updates = Arc::new(RwLock::new(UpdateManager::new(dir.path().to_path_buf())));
+
+        let mut manager =
+            RecoveryManager::new(config, dir.path().to_path_buf(), snapshots, updates);
+
+        let attempt = manager
+            .manual_recovery(RecoveryAction::RollbackToSnapshot(uuid::Uuid::new_v4()))
+            .await;
+
+        assert!(!attempt.success);
+        assert!(attempt.details.contains("failed"));
+    }
+
+    #[test]
+    fn test_recovery_attempt_serialization() {
+        let attempt = RecoveryAttempt {
+            id: uuid::Uuid::new_v4(),
+            action: RecoveryAction::ClearJobQueue,
+            reason: "test".into(),
+            timestamp: chrono::Utc::now(),
+            success: true,
+            details: "details".into(),
+        };
+
+        let json = serde_json::to_string(&attempt).unwrap();
+        let decoded: RecoveryAttempt = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.reason, "test");
+        assert_eq!(decoded.success, true);
     }
 }

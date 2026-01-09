@@ -573,6 +573,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_health_status_equality() {
+        assert_eq!(HealthStatus::Healthy, HealthStatus::Healthy);
+        assert_ne!(HealthStatus::Healthy, HealthStatus::Degraded);
+        assert_ne!(HealthStatus::Degraded, HealthStatus::Unhealthy);
+        assert_ne!(HealthStatus::Unhealthy, HealthStatus::Critical);
+    }
+
+    #[test]
+    fn test_alert_severity() {
+        let severities = vec![
+            AlertSeverity::Info,
+            AlertSeverity::Warning,
+            AlertSeverity::Error,
+            AlertSeverity::Critical,
+        ];
+
+        for severity in severities {
+            let alert = HealthAlert {
+                id: uuid::Uuid::new_v4(),
+                severity,
+                message: "Test alert".into(),
+                component: "test".into(),
+                created_at: Utc::now(),
+                acknowledged: false,
+            };
+            assert_eq!(alert.severity, severity);
+        }
+    }
+
+    #[test]
+    fn test_health_metrics_default() {
+        let metrics = HealthMetrics::default();
+        assert_eq!(metrics.memory_percent, 0.0);
+        assert_eq!(metrics.cpu_percent, 0.0);
+        assert_eq!(metrics.disk_percent, 0.0);
+        assert_eq!(metrics.pending_jobs, 0);
+        assert_eq!(metrics.running_jobs, 0);
+        assert_eq!(metrics.evaluations_per_hour, 0);
+        assert_eq!(metrics.failures_per_hour, 0);
+    }
+
+    #[test]
     fn test_health_check() {
         let config = HealthConfig::default();
         let mut monitor = HealthMonitor::new(config);
@@ -646,5 +688,231 @@ mod tests {
 
         let check = monitor.check(metrics);
         assert_eq!(check.status, HealthStatus::Critical);
+    }
+
+    #[test]
+    fn test_high_cpu_warning() {
+        let config = HealthConfig {
+            cpu_warn_percent: 80,
+            ..Default::default()
+        };
+        let mut monitor = HealthMonitor::new(config);
+
+        let metrics = HealthMetrics {
+            memory_percent: 50.0,
+            cpu_percent: 95.0, // High CPU
+            disk_percent: 40.0,
+            pending_jobs: 10,
+            running_jobs: 2,
+            evaluations_per_hour: 100,
+            failures_per_hour: 1,
+            avg_eval_time_ms: 500,
+            connected_peers: 5,
+            block_height: 1000,
+            epoch: 10,
+            uptime_secs: 3600,
+        };
+
+        let check = monitor.check(metrics);
+        assert_ne!(check.status, HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_high_disk_warning() {
+        let config = HealthConfig {
+            disk_warn_percent: 75,
+            ..Default::default()
+        };
+        let mut monitor = HealthMonitor::new(config);
+
+        let metrics = HealthMetrics {
+            memory_percent: 50.0,
+            cpu_percent: 50.0,
+            disk_percent: 90.0, // High disk
+            pending_jobs: 10,
+            running_jobs: 2,
+            evaluations_per_hour: 100,
+            failures_per_hour: 1,
+            avg_eval_time_ms: 500,
+            connected_peers: 5,
+            block_height: 1000,
+            epoch: 10,
+            uptime_secs: 3600,
+        };
+
+        let check = monitor.check(metrics);
+        assert_ne!(check.status, HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_high_failure_rate() {
+        let config = HealthConfig {
+            cpu_warn_percent: 30,
+            memory_warn_percent: 30,
+            ..Default::default()
+        };
+        let mut monitor = HealthMonitor::new(config);
+
+        let metrics = HealthMetrics {
+            memory_percent: 50.0,
+            cpu_percent: 50.0,
+            disk_percent: 50.0,
+            pending_jobs: 10,
+            running_jobs: 2,
+            evaluations_per_hour: 100,
+            failures_per_hour: 50, // 50% failure rate
+            avg_eval_time_ms: 500,
+            connected_peers: 5,
+            block_height: 1000,
+            epoch: 10,
+            uptime_secs: 3600,
+        };
+
+        let check = monitor.check(metrics);
+        assert_ne!(check.status, HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_job_queue_overload() {
+        let config = HealthConfig {
+            max_pending_jobs: 100,
+            ..Default::default()
+        };
+        let mut monitor = HealthMonitor::new(config);
+
+        let metrics = HealthMetrics {
+            memory_percent: 50.0,
+            cpu_percent: 50.0,
+            disk_percent: 50.0,
+            pending_jobs: 500, // Way over limit
+            running_jobs: 2,
+            evaluations_per_hour: 100,
+            failures_per_hour: 1,
+            avg_eval_time_ms: 500,
+            connected_peers: 5,
+            block_height: 1000,
+            epoch: 10,
+            uptime_secs: 3600,
+        };
+
+        let check = monitor.check(metrics);
+        assert_ne!(check.status, HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_alert_acknowledgement() {
+        let config = HealthConfig::default();
+        let mut monitor = HealthMonitor::new(config);
+
+        // Trigger an alert
+        let metrics = HealthMetrics {
+            memory_percent: 95.0, // High memory
+            cpu_percent: 50.0,
+            disk_percent: 50.0,
+            pending_jobs: 10,
+            running_jobs: 2,
+            evaluations_per_hour: 100,
+            failures_per_hour: 1,
+            avg_eval_time_ms: 500,
+            connected_peers: 5,
+            block_height: 1000,
+            epoch: 10,
+            uptime_secs: 3600,
+        };
+
+        monitor.check(metrics);
+        let alerts = monitor.active_alerts();
+        assert!(!alerts.is_empty());
+
+        if let Some(alert) = alerts.first() {
+            let alert_id = alert.id;
+            monitor.acknowledge_alert(alert_id);
+            let alerts_after = monitor.active_alerts();
+            let ack_alerts: Vec<_> = alerts_after
+                .iter()
+                .filter(|a| a.id == alert_id)
+                .collect();
+            if !ack_alerts.is_empty() {
+                assert!(ack_alerts[0].acknowledged);
+            }
+        }
+    }
+
+    #[test]
+    fn test_health_history() {
+        let config = HealthConfig::default();
+        let mut monitor = HealthMonitor::new(config);
+
+        // Run multiple checks
+        for i in 0..5 {
+            let metrics = HealthMetrics {
+                memory_percent: 50.0 + i as f32,
+                cpu_percent: 30.0,
+                disk_percent: 40.0,
+                pending_jobs: 10,
+                running_jobs: 2,
+                evaluations_per_hour: 100,
+                failures_per_hour: 1,
+                avg_eval_time_ms: 500,
+                connected_peers: 5,
+                block_height: 1000 + i,
+                epoch: 10,
+                uptime_secs: 3600,
+            };
+            monitor.check(metrics);
+        }
+
+        // Verify health monitoring is working
+        let status = monitor.current_status();
+        assert!(matches!(status, HealthStatus::Healthy | HealthStatus::Degraded));
+    }
+
+    #[test]
+    fn test_component_health() {
+        let component = ComponentHealth {
+            name: "test_component".into(),
+            status: HealthStatus::Healthy,
+            details: "All good".into(),
+            last_success: Some(Utc::now()),
+        };
+
+        assert_eq!(component.name, "test_component");
+        assert_eq!(component.status, HealthStatus::Healthy);
+        assert!(component.last_success.is_some());
+    }
+
+    #[test]
+    fn test_needs_recovery() {
+        let config = HealthConfig {
+            failure_threshold: 2,
+            cpu_warn_percent: 80,
+            memory_warn_percent: 80,
+            ..Default::default()
+        };
+        let mut monitor = HealthMonitor::new(config);
+
+        // First failure
+        let bad_metrics = HealthMetrics {
+            memory_percent: 99.0,
+            cpu_percent: 99.0,
+            disk_percent: 99.0,
+            pending_jobs: 10000,
+            running_jobs: 2,
+            evaluations_per_hour: 10,
+            failures_per_hour: 50,
+            avg_eval_time_ms: 5000,
+            connected_peers: 1,
+            block_height: 1000,
+            epoch: 10,
+            uptime_secs: 3600,
+        };
+
+        monitor.check(bad_metrics.clone());
+        monitor.check(bad_metrics.clone());
+        monitor.check(bad_metrics);
+
+        // Should trigger degraded/critical status
+        let status = monitor.current_status();
+        assert!(matches!(status, HealthStatus::Critical | HealthStatus::Degraded));
     }
 }

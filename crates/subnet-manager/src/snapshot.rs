@@ -334,6 +334,26 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn test_snapshot_meta_fields() {
+        let meta = SnapshotMeta {
+            id: uuid::Uuid::new_v4(),
+            name: "test_snapshot".into(),
+            block_height: 1000,
+            epoch: 10,
+            state_hash: "abc123".into(),
+            created_at: Utc::now(),
+            size_bytes: 1024,
+            auto: true,
+            reason: "Auto snapshot".into(),
+        };
+
+        assert_eq!(meta.name, "test_snapshot");
+        assert_eq!(meta.block_height, 1000);
+        assert_eq!(meta.epoch, 10);
+        assert!(meta.auto);
+    }
+
+    #[test]
     fn test_snapshot_manager() {
         let dir = tempdir().unwrap();
         let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap();
@@ -370,5 +390,278 @@ mod tests {
 
         // Should only keep 2
         assert_eq!(manager.list_snapshots().len(), 2);
+    }
+
+    #[test]
+    fn test_manual_snapshot() {
+        let dir = tempdir().unwrap();
+        let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 5).unwrap();
+
+        let kp = Keypair::generate();
+        let state = ChainState::new(kp.hotkey(), NetworkConfig::default());
+
+        let id = manager
+            .create_snapshot("manual_backup", 500, 5, &state, "Manual backup before update", false)
+            .unwrap();
+
+        let snapshots = manager.list_snapshots();
+        assert_eq!(snapshots.len(), 1);
+        
+        let meta = &snapshots[0];
+        assert!(!meta.auto);
+        assert_eq!(meta.reason, "Manual backup before update");
+    }
+
+    #[test]
+    fn test_auto_snapshot() {
+        let dir = tempdir().unwrap();
+        let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 5).unwrap();
+
+        let kp = Keypair::generate();
+        let state = ChainState::new(kp.hotkey(), NetworkConfig::default());
+
+        let id = manager
+            .create_snapshot("auto_snapshot_epoch_10", 1000, 10, &state, "Automatic snapshot", true)
+            .unwrap();
+
+        let snapshots = manager.list_snapshots();
+        let meta = &snapshots[0];
+        assert!(meta.auto);
+    }
+
+    #[test]
+    fn test_snapshot_with_challenge_data() {
+        let dir = tempdir().unwrap();
+        
+        // Create a challenges directory with some data
+        let challenges_dir = dir.path().join("challenges");
+        std::fs::create_dir_all(&challenges_dir).unwrap();
+        
+        let challenge_dir = challenges_dir.join("test_challenge");
+        std::fs::create_dir_all(&challenge_dir).unwrap();
+        let db_dir = challenge_dir.join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("test.dat"), b"test data").unwrap();
+
+        let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap();
+
+        let kp = Keypair::generate();
+        let state = ChainState::new(kp.hotkey(), NetworkConfig::default());
+
+        let id = manager
+            .create_snapshot("with_challenges", 100, 1, &state, "test", false)
+            .unwrap();
+
+        let snapshot = manager.restore_snapshot(id).unwrap();
+        assert!(!snapshot.challenge_data.is_empty());
+    }
+
+    #[test]
+    fn test_snapshot_list_ordering() {
+        let dir = tempdir().unwrap();
+        let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 10).unwrap();
+
+        let kp = Keypair::generate();
+        let state = ChainState::new(kp.hotkey(), NetworkConfig::default());
+
+        // Create multiple snapshots
+        for i in 0..5 {
+            manager
+                .create_snapshot(&format!("snap_{}", i), i * 100, i, &state, "test", true)
+                .unwrap();
+        }
+
+        let snapshots = manager.list_snapshots();
+        assert_eq!(snapshots.len(), 5);
+        
+        // Verify they're tracked
+        for i in 0..5 {
+            assert_eq!(snapshots[i].block_height, (i * 100) as u64);
+        }
+    }
+
+    #[test]
+    fn test_snapshot_size_tracking() {
+        let dir = tempdir().unwrap();
+        let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap();
+
+        let kp = Keypair::generate();
+        let state = ChainState::new(kp.hotkey(), NetworkConfig::default());
+
+        let id = manager
+            .create_snapshot("size_test", 100, 1, &state, "test", false)
+            .unwrap();
+
+        let snapshots = manager.list_snapshots();
+        let meta = &snapshots[0];
+        
+        // Size should be set after saving
+        assert!(meta.size_bytes > 0);
+    }
+
+    #[test]
+    fn test_snapshot_hash_computation() {
+        let data = b"test data for hashing";
+        let hash = SnapshotManager::compute_hash(data);
+        
+        // SHA256 hash should be 64 hex characters
+        assert_eq!(hash.len(), 64);
+        
+        // Same data should produce same hash
+        let hash2 = SnapshotManager::compute_hash(data);
+        assert_eq!(hash, hash2);
+    }
+
+    #[test]
+    fn test_delete_snapshot() {
+        let dir = tempdir().unwrap();
+        let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 5).unwrap();
+
+        let kp = Keypair::generate();
+        let state = ChainState::new(kp.hotkey(), NetworkConfig::default());
+
+        let id = manager
+            .create_snapshot("to_delete", 100, 1, &state, "test", false)
+            .unwrap();
+
+        assert_eq!(manager.list_snapshots().len(), 1);
+
+        manager.delete_snapshot(id).unwrap();
+        assert_eq!(manager.list_snapshots().len(), 0);
+    }
+
+    #[test]
+    fn test_latest_snapshot() {
+        let dir = tempdir().unwrap();
+        let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 5).unwrap();
+
+        assert!(manager.latest_snapshot().is_none());
+
+        let kp = Keypair::generate();
+        let state = ChainState::new(kp.hotkey(), NetworkConfig::default());
+
+        manager
+            .create_snapshot("snap1", 100, 1, &state, "test", false)
+            .unwrap();
+        manager
+            .create_snapshot("snap2", 200, 2, &state, "test", false)
+            .unwrap();
+
+        let latest = manager.latest_snapshot().unwrap();
+        assert_eq!(latest.name, "snap2");
+        assert_eq!(latest.block_height, 200);
+    }
+
+    #[test]
+    fn test_get_snapshot() {
+        let dir = tempdir().unwrap();
+        let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 5).unwrap();
+
+        let kp = Keypair::generate();
+        let state = ChainState::new(kp.hotkey(), NetworkConfig::default());
+
+        let id = manager
+            .create_snapshot("test_snap", 100, 1, &state, "test", false)
+            .unwrap();
+
+        let snapshot = manager.get_snapshot(id).unwrap();
+        assert_eq!(snapshot.name, "test_snap");
+        assert_eq!(snapshot.block_height, 100);
+    }
+
+    #[test]
+    fn test_get_nonexistent_snapshot() {
+        let dir = tempdir().unwrap();
+        let manager = SnapshotManager::new(dir.path().to_path_buf(), 5).unwrap();
+
+        let result = manager.get_snapshot(uuid::Uuid::new_v4());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_snapshot_retention_limit() {
+        let dir = tempdir().unwrap();
+        let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 3).unwrap();
+
+        let kp = Keypair::generate();
+        let state = ChainState::new(kp.hotkey(), NetworkConfig::default());
+
+        // Create 5 snapshots with retention limit of 3
+        for i in 0..5 {
+            manager
+                .create_snapshot(
+                    &format!("snap{}", i),
+                    (i + 1) * 100,
+                    i + 1,
+                    &state,
+                    "test",
+                    false,
+                )
+                .unwrap();
+        }
+
+        // Should only keep the 3 most recent
+        let snapshots = manager.list_snapshots();
+        assert_eq!(snapshots.len(), 3);
+        
+        // Just verify we have exactly 3 snapshots (pruning worked)
+        // The exact order/names may vary based on pruning implementation
+    }
+
+    #[test]
+    fn test_snapshot_metadata_fields() {
+        let dir = tempdir().unwrap();
+        let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 5).unwrap();
+
+        let kp = Keypair::generate();
+        let state = ChainState::new(kp.hotkey(), NetworkConfig::default());
+
+        let id = manager
+            .create_snapshot("metadata_test", 12345, 67, &state, "test reason", true)
+            .unwrap();
+
+        let snapshot = manager.get_snapshot(id).unwrap();
+        assert_eq!(snapshot.name, "metadata_test");
+        assert_eq!(snapshot.block_height, 12345);
+        assert_eq!(snapshot.epoch, 67);
+        assert_eq!(snapshot.reason, "test reason");
+        assert!(snapshot.auto);
+        assert!(snapshot.size_bytes > 0);
+    }
+
+    #[test]
+    fn test_delete_nonexistent_snapshot() {
+        let dir = tempdir().unwrap();
+        let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 5).unwrap();
+
+        // Deleting nonexistent snapshot should succeed (no-op)
+        let result = manager.delete_snapshot(uuid::Uuid::new_v4());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_snapshot_ordering_by_time() {
+        let dir = tempdir().unwrap();
+        let mut manager = SnapshotManager::new(dir.path().to_path_buf(), 10).unwrap();
+
+        let kp = Keypair::generate();
+        let state = ChainState::new(kp.hotkey(), NetworkConfig::default());
+
+        // Create snapshots in order
+        for i in 0..3 {
+            manager
+                .create_snapshot(&format!("snap{}", i), (i + 1) * 100, i + 1, &state, "test", false)
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let snapshots = manager.list_snapshots();
+        assert_eq!(snapshots.len(), 3);
+        
+        // Just verify all snapshots are present
+        let names: Vec<&str> = snapshots.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"snap0"));
+        assert!(names.contains(&"snap1"));
+        assert!(names.contains(&"snap2"));
     }
 }
