@@ -93,6 +93,11 @@ impl SubtensorClient {
         self.metagraph.as_ref()
     }
 
+    /// Set the metagraph directly (useful when synced externally)
+    pub fn set_metagraph(&mut self, metagraph: Metagraph) {
+        self.metagraph = Some(metagraph);
+    }
+
     /// Get UID for a hotkey from cached metagraph
     pub fn get_uid_for_hotkey(&self, hotkey: &str) -> Option<u16> {
         if let Some(uid) = self.uid_overrides.get(hotkey) {

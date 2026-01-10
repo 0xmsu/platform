@@ -9,8 +9,8 @@ use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use platform_bittensor::{
-    signer_from_seed, sync_metagraph, BittensorClient, BittensorSigner, BlockSync, BlockSyncConfig,
-    BlockSyncEvent, ExtrinsicWait, Subtensor,
+    signer_from_seed, sync_metagraph, BittensorClient, BittensorConfig, BittensorSigner, BlockSync,
+    BlockSyncConfig, BlockSyncEvent, ExtrinsicWait, Subtensor, SubtensorClient,
 };
 use platform_core::{production_sudo_key, ChainState, Keypair, NetworkConfig};
 use platform_rpc::{RpcConfig, RpcServer};
@@ -124,7 +124,11 @@ impl PlatformServerClient {
     }
 
     /// Get weights with infinite retry loop (30s interval)
-    pub async fn get_weights(&self, challenge_id: &str, epoch: u64) -> Result<Vec<(u16, u16)>> {
+    /// Returns hotkey-based weights: Vec<(hotkey, weight_f64)>
+    /// Supports both formats:
+    /// - New format: { weights: [{ hotkey: "...", weight: 0.5 }] }
+    /// - Legacy format: { weights: [{ uid: 1, weight: 65535 }] }
+    pub async fn get_weights(&self, challenge_id: &str, epoch: u64) -> Result<Vec<(String, f64)>> {
         let url = format!(
             "{}/api/v1/challenges/{}/get_weights?epoch={}",
             self.base_url, challenge_id, epoch
@@ -142,10 +146,18 @@ impl PlatformServerClient {
                                 .map(|arr| {
                                     arr.iter()
                                         .filter_map(|w| {
-                                            Some((
-                                                w.get("uid")?.as_u64()? as u16,
-                                                w.get("weight")?.as_u64()? as u16,
-                                            ))
+                                            // Try new format first: { hotkey, weight: f64 }
+                                            if let Some(hotkey) =
+                                                w.get("hotkey").and_then(|h| h.as_str())
+                                            {
+                                                let weight = w
+                                                    .get("weight")
+                                                    .and_then(|v| v.as_f64())
+                                                    .unwrap_or(0.0);
+                                                return Some((hotkey.to_string(), weight));
+                                            }
+                                            // Legacy format: { uid, weight: u16 } - skip, not supported
+                                            None
                                         })
                                         .collect()
                                 })
@@ -569,6 +581,7 @@ async fn main() -> Result<()> {
     // Bittensor setup
     let subtensor: Option<Arc<Subtensor>>;
     let subtensor_signer: Option<Arc<BittensorSigner>>;
+    let subtensor_client: Option<Arc<RwLock<SubtensorClient>>>;
     let mut block_rx: Option<tokio::sync::mpsc::Receiver<BlockSyncEvent>> = None;
 
     if !args.no_bittensor {
@@ -601,12 +614,25 @@ async fn main() -> Result<()> {
 
                 subtensor = Some(Arc::new(st));
 
-                // Sync metagraph
-                let client = BittensorClient::new(&args.subtensor_endpoint).await?;
-                match sync_metagraph(&client, args.netuid).await {
-                    Ok(mg) => info!("Metagraph: {} neurons", mg.n),
+                // Create SubtensorClient for metagraph lookups (hotkey -> UID conversion)
+                let mut client = SubtensorClient::new(BittensorConfig {
+                    endpoint: args.subtensor_endpoint.clone(),
+                    netuid: args.netuid,
+                    ..Default::default()
+                });
+
+                // Sync metagraph and store client for hotkey -> UID lookups
+                let bittensor_client = BittensorClient::new(&args.subtensor_endpoint).await?;
+                match sync_metagraph(&bittensor_client, args.netuid).await {
+                    Ok(mg) => {
+                        info!("Metagraph: {} neurons", mg.n);
+                        // Store metagraph in our SubtensorClient
+                        client.set_metagraph(mg);
+                    }
                     Err(e) => warn!("Metagraph sync failed: {}", e),
                 }
+
+                subtensor_client = Some(Arc::new(RwLock::new(client)));
 
                 // Block sync
                 let mut sync = BlockSync::new(BlockSyncConfig {
@@ -615,8 +641,8 @@ async fn main() -> Result<()> {
                 });
                 let rx = sync.take_event_receiver();
 
-                let client = Arc::new(client);
-                if let Err(e) = sync.connect(client).await {
+                let bittensor_client = Arc::new(bittensor_client);
+                if let Err(e) = sync.connect(bittensor_client).await {
                     warn!("Block sync connect failed: {}", e);
                 } else {
                     tokio::spawn(async move {
@@ -632,12 +658,14 @@ async fn main() -> Result<()> {
                 error!("Subtensor connection failed: {}", e);
                 subtensor = None;
                 subtensor_signer = None;
+                subtensor_client = None;
             }
         }
     } else {
         info!("Bittensor: disabled");
         subtensor = None;
         subtensor_signer = None;
+        subtensor_client = None;
     }
 
     info!("Validator running. Ctrl+C to stop.");
@@ -668,6 +696,7 @@ async fn main() -> Result<()> {
                     &platform_client,
                     &subtensor,
                     &subtensor_signer,
+                    &subtensor_client,
                     netuid,
                     version_key,
                 ).await;
@@ -724,6 +753,7 @@ async fn handle_block_event(
     platform_client: &Arc<PlatformServerClient>,
     subtensor: &Option<Arc<Subtensor>>,
     signer: &Option<Arc<BittensorSigner>>,
+    subtensor_client: &Option<Arc<RwLock<SubtensorClient>>>,
     netuid: u16,
     version_key: u64,
 ) {
@@ -744,7 +774,11 @@ async fn handle_block_event(
             info!("=== COMMIT WINDOW: epoch {} block {} ===", epoch, block);
 
             // Submit weights via Subtensor (handles CRv4/commit-reveal automatically)
-            if let (Some(st), Some(sig)) = (subtensor.as_ref(), signer.as_ref()) {
+            if let (Some(st), Some(sig), Some(client)) = (
+                subtensor.as_ref(),
+                signer.as_ref(),
+                subtensor_client.as_ref(),
+            ) {
                 // Fetch weights from platform-server
                 let mechanism_weights = match platform_client.list_challenges().await {
                     Ok(challenges) if !challenges.is_empty() => {
@@ -753,17 +787,47 @@ async fn handle_block_event(
                         for challenge in challenges.iter().filter(|c| c.is_healthy) {
                             match platform_client.get_weights(&challenge.id, epoch).await {
                                 Ok(w) if !w.is_empty() => {
-                                    let uids: Vec<u16> = w.iter().map(|(u, _)| *u).collect();
-                                    let vals: Vec<u16> = w.iter().map(|(_, v)| *v).collect();
+                                    // Convert hotkeys to UIDs using metagraph
+                                    let client_guard = client.read();
+                                    let mut uids = Vec::new();
+                                    let mut vals = Vec::new();
 
-                                    info!(
-                                        "Challenge {} (mech {}): {} weights",
-                                        challenge.id,
-                                        challenge.mechanism_id,
-                                        uids.len()
-                                    );
+                                    for (hotkey, weight_f64) in &w {
+                                        if let Some(uid) = client_guard.get_uid_for_hotkey(hotkey) {
+                                            // Convert f64 weight (0.0-1.0) to u16 (0-65535)
+                                            let weight_u16 = (weight_f64 * 65535.0).round() as u16;
+                                            uids.push(uid);
+                                            vals.push(weight_u16);
+                                            info!(
+                                                "  {} -> UID {} (weight: {:.4} = {})",
+                                                &hotkey[..16],
+                                                uid,
+                                                weight_f64,
+                                                weight_u16
+                                            );
+                                        } else {
+                                            warn!(
+                                                "Hotkey {} not found in metagraph, skipping",
+                                                &hotkey[..16]
+                                            );
+                                        }
+                                    }
+                                    drop(client_guard);
 
-                                    weights.push((challenge.mechanism_id as u8, uids, vals));
+                                    if !uids.is_empty() {
+                                        info!(
+                                            "Challenge {} (mech {}): {} weights",
+                                            challenge.id,
+                                            challenge.mechanism_id,
+                                            uids.len()
+                                        );
+                                        weights.push((challenge.mechanism_id as u8, uids, vals));
+                                    } else {
+                                        warn!(
+                                            "Challenge {} has weights but no UIDs resolved",
+                                            challenge.id
+                                        );
+                                    }
                                 }
                                 Ok(_) => debug!("Challenge {} has no weights", challenge.id),
                                 Err(e) => {
