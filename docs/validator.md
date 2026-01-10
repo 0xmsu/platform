@@ -21,6 +21,11 @@ git clone https://github.com/PlatformNetwork/platform.git
 cd platform
 cp .env.example .env
 # Edit .env: add your VALIDATOR_SECRET_KEY (BIP39 mnemonic)
+
+# Create the Docker network (required, one-time setup)
+docker network create platform-network
+
+# Start the validator
 docker compose up -d
 ```
 
