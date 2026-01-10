@@ -583,6 +583,7 @@ async fn main() -> Result<()> {
     let subtensor_signer: Option<Arc<BittensorSigner>>;
     let subtensor_client: Option<Arc<RwLock<SubtensorClient>>>;
     let mut block_rx: Option<tokio::sync::mpsc::Receiver<BlockSyncEvent>> = None;
+    let bittensor_client_for_metagraph: Option<Arc<BittensorClient>>;
 
     if !args.no_bittensor {
         info!(
@@ -642,7 +643,9 @@ async fn main() -> Result<()> {
                 let rx = sync.take_event_receiver();
 
                 let bittensor_client = Arc::new(bittensor_client);
-                if let Err(e) = sync.connect(bittensor_client).await {
+                let bittensor_client_for_sync = bittensor_client.clone();
+                bittensor_client_for_metagraph = Some(bittensor_client.clone());
+                if let Err(e) = sync.connect(bittensor_client_for_sync).await {
                     warn!("Block sync connect failed: {}", e);
                 } else {
                     tokio::spawn(async move {
@@ -659,6 +662,7 @@ async fn main() -> Result<()> {
                 subtensor = None;
                 subtensor_signer = None;
                 subtensor_client = None;
+                bittensor_client_for_metagraph = None;
             }
         }
     } else {
@@ -666,6 +670,7 @@ async fn main() -> Result<()> {
         subtensor = None;
         subtensor_signer = None;
         subtensor_client = None;
+        bittensor_client_for_metagraph = None;
     }
 
     info!("Validator running. Ctrl+C to stop.");
@@ -675,6 +680,7 @@ async fn main() -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     let mut metrics_interval = tokio::time::interval(Duration::from_secs(5));
     let mut challenge_refresh_interval = tokio::time::interval(Duration::from_secs(60));
+    let mut metagraph_refresh_interval = tokio::time::interval(Duration::from_secs(300)); // 5 minutes
 
     // Store challenges in Arc<RwLock> for periodic refresh
     let cached_challenges: Arc<RwLock<Vec<ChallengeInfo>>> = Arc::new(RwLock::new(
@@ -734,6 +740,22 @@ async fn main() -> Result<()> {
                     }
                     Err(e) => {
                         warn!("Failed to refresh challenges: {}", e);
+                    }
+                }
+            }
+
+            _ = metagraph_refresh_interval.tick() => {
+                // Re-sync metagraph to pick up new miners
+                if let (Some(ref bt_client), Some(ref st_client)) = (&bittensor_client_for_metagraph, &subtensor_client) {
+                    match sync_metagraph(bt_client, netuid).await {
+                        Ok(mg) => {
+                            info!("Metagraph refreshed: {} neurons", mg.n);
+                            let mut client = st_client.write();
+                            client.set_metagraph(mg);
+                        }
+                        Err(e) => {
+                            warn!("Metagraph refresh failed: {}", e);
+                        }
                     }
                 }
             }
