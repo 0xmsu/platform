@@ -677,10 +677,15 @@ async fn main() -> Result<()> {
 
     let netuid = args.netuid;
     let version_key = args.version_key;
+    let subtensor_endpoint = args.subtensor_endpoint.clone();
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     let mut metrics_interval = tokio::time::interval(Duration::from_secs(5));
     let mut challenge_refresh_interval = tokio::time::interval(Duration::from_secs(60));
     let mut metagraph_refresh_interval = tokio::time::interval(Duration::from_secs(300)); // 5 minutes
+
+    // Track Bittensor connection state for reconnection
+    let mut bittensor_disconnected = false;
+    let mut last_reconnect_attempt = std::time::Instant::now();
 
     // Store challenges in Arc<RwLock> for periodic refresh
     let cached_challenges: Arc<RwLock<Vec<ChallengeInfo>>> = Arc::new(RwLock::new(
@@ -703,6 +708,17 @@ async fn main() -> Result<()> {
                     None => std::future::pending().await,
                 }
             } => {
+                // Track disconnection state for reconnection logic
+                match &event {
+                    BlockSyncEvent::Disconnected(_) => {
+                        bittensor_disconnected = true;
+                    }
+                    BlockSyncEvent::Reconnected | BlockSyncEvent::NewBlock { .. } => {
+                        bittensor_disconnected = false;
+                    }
+                    _ => {}
+                }
+
                 handle_block_event(
                     event,
                     &platform_client,
@@ -717,6 +733,55 @@ async fn main() -> Result<()> {
 
             _ = interval.tick() => {
                 debug!("Heartbeat");
+
+                // Check if we need to attempt Bittensor reconnection
+                if bittensor_disconnected && last_reconnect_attempt.elapsed() > Duration::from_secs(30) {
+                    last_reconnect_attempt = std::time::Instant::now();
+                    info!("Attempting Bittensor reconnection...");
+
+                    // Try to reconnect by creating a new BlockSync
+                    match BittensorClient::new(&subtensor_endpoint).await {
+                        Ok(new_client) => {
+                            let mut sync = BlockSync::new(BlockSyncConfig {
+                                netuid,
+                                ..Default::default()
+                            });
+
+                            if let Some(new_rx) = sync.take_event_receiver() {
+                                let new_client = Arc::new(new_client);
+                                match sync.connect(new_client.clone()).await {
+                                    Ok(()) => {
+                                        // Spawn the sync task to keep it running
+                                        tokio::spawn(async move {
+                                            if let Err(e) = sync.start().await {
+                                                error!("Block sync error after reconnect: {}", e);
+                                            }
+                                        });
+
+                                        info!("Bittensor reconnected successfully");
+                                        block_rx = Some(new_rx);
+                                        bittensor_disconnected = false;
+
+                                        // Also refresh metagraph with new client
+                                        if let Some(ref st_client) = subtensor_client {
+                                            if let Ok(mg) = sync_metagraph(&new_client, netuid).await {
+                                                info!("Metagraph refreshed after reconnect: {} neurons", mg.n);
+                                                let mut client = st_client.write();
+                                                client.set_metagraph(mg);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to connect block sync: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Bittensor reconnection failed: {} (will retry in 30s)", e);
+                        }
+                    }
+                }
             }
 
             _ = metrics_interval.tick() => {
