@@ -161,19 +161,26 @@ async fn proxy_to_challenge(
             let status = resp.status();
             let headers = resp.headers().clone();
 
-            // For streaming endpoints, forward the response body as a stream
+            // For streaming endpoints, forward the response body as a stream (raw passthrough)
             if is_streaming && status.is_success() {
                 debug!("Streaming response for {}", path);
                 let stream = resp.bytes_stream();
                 let body = Body::from_stream(stream);
 
                 let mut response = Response::builder().status(status);
+                // Forward all original headers from upstream (preserves SSE format)
                 for (key, value) in headers.iter() {
-                    response = response.header(key, value);
+                    // Skip hop-by-hop headers that shouldn't be forwarded
+                    let key_str = key.as_str();
+                    if key_str != "transfer-encoding" && key_str != "connection" {
+                        response = response.header(key, value);
+                    }
                 }
-                // Ensure SSE headers are set
+                // Only set SSE headers if not already present from upstream
+                if !headers.contains_key("content-type") {
+                    response = response.header("Content-Type", "text/event-stream");
+                }
                 response = response
-                    .header("Content-Type", "text/event-stream")
                     .header("Cache-Control", "no-cache")
                     .header("Connection", "keep-alive");
 
