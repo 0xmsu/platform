@@ -62,6 +62,17 @@ fn get_challenge_url(state: &AppState, challenge_name: &str) -> Option<String> {
     None
 }
 
+/// Check if request body has "stream": true (SSE streaming request)
+fn is_streaming_request(body: &[u8]) -> bool {
+    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
+        json.get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    } else {
+        false
+    }
+}
+
 /// Generic proxy to any challenge
 async fn proxy_to_challenge(
     state: &AppState,
@@ -106,10 +117,6 @@ async fn proxy_to_challenge(
             path.trim_start_matches('/')
         ),
     };
-    debug!(
-        "Proxying to challenge '{}': {} -> {}",
-        challenge_name, path, url
-    );
 
     let method = request.method().clone();
     let headers = request.headers().clone();
@@ -122,8 +129,23 @@ async fn proxy_to_challenge(
         }
     };
 
-    // Use shared HTTP client from AppState (avoids creating new client per request)
-    let mut req_builder = state.http_client.request(method, &url);
+    let is_streaming = is_streaming_request(&body_bytes);
+    debug!(
+        "Proxying to challenge '{}': {} -> {} (streaming: {})",
+        challenge_name, path, url, is_streaming
+    );
+
+    // For streaming endpoints, create a client without timeout
+    let client = if is_streaming {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300)) // 5 min timeout for streaming
+            .build()
+            .unwrap_or_else(|_| state.http_client.clone())
+    } else {
+        state.http_client.clone()
+    };
+
+    let mut req_builder = client.request(method, &url);
     for (key, value) in headers.iter() {
         if key != "host" && key != "content-length" {
             req_builder = req_builder.header(key, value);
@@ -139,6 +161,28 @@ async fn proxy_to_challenge(
             let status = resp.status();
             let headers = resp.headers().clone();
 
+            // For streaming endpoints, forward the response body as a stream
+            if is_streaming && status.is_success() {
+                debug!("Streaming response for {}", path);
+                let stream = resp.bytes_stream();
+                let body = Body::from_stream(stream);
+
+                let mut response = Response::builder().status(status);
+                for (key, value) in headers.iter() {
+                    response = response.header(key, value);
+                }
+                // Ensure SSE headers are set
+                response = response
+                    .header("Content-Type", "text/event-stream")
+                    .header("Cache-Control", "no-cache")
+                    .header("Connection", "keep-alive");
+
+                return response
+                    .body(body)
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
+
+            // Non-streaming: read full body
             match resp.bytes().await {
                 Ok(body) => {
                     let mut response = Response::builder().status(status);

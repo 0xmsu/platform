@@ -53,7 +53,7 @@ sentry = { workspace = true }
 clap = { workspace = true }
 
 # HTTP client (for challenge proxy)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 
 # Concurrency
 parking_lot = { workspace = true }
