@@ -722,6 +722,52 @@ async fn main() -> Result<()> {
     let platform_url = args.platform_server.clone();
     let hotkey = keypair.ss58_address();
 
+    // Spawn a task to submit weights on startup if needed (after 2 minute delay)
+    // This handles the case where validator starts mid-epoch and misses CommitWindowOpen
+    if let (Some(ref st), Some(ref sig), Some(ref client)) = (
+        subtensor.clone(),
+        subtensor_signer.clone(),
+        subtensor_client.clone(),
+    ) {
+        let st_clone = st.clone();
+        let sig_clone = sig.clone();
+        let client_clone = client.clone();
+        let platform_client_clone = platform_client.clone();
+        let cached_challenges_clone = cached_challenges.clone();
+
+        tokio::spawn(async move {
+            // Wait 2 minutes for everything to initialize
+            info!("Will check for missed weights submission in 2 minutes...");
+            tokio::time::sleep(Duration::from_secs(120)).await;
+
+            // Check if we have pending commits (means we already submitted this epoch)
+            if !st_clone.has_pending_commits().await {
+                info!("No pending commits found - submitting weights for current epoch");
+
+                // Get current epoch estimate
+                let epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    / 12;
+
+                submit_weights_for_epoch(
+                    epoch,
+                    &platform_client_clone,
+                    &st_clone,
+                    &sig_clone,
+                    &client_clone,
+                    &cached_challenges_clone,
+                    netuid,
+                    version_key,
+                )
+                .await;
+            } else {
+                info!("Pending commits found - weights already submitted for this epoch");
+            }
+        });
+    }
+
     loop {
         tokio::select! {
             Some(event) = async {
@@ -878,6 +924,245 @@ fn load_keypair(args: &Args) -> Result<Keypair> {
     Ok(Keypair::from_mnemonic(secret)?)
 }
 
+/// Submit weights for a given epoch
+/// This is the core weight submission logic, extracted to be reusable
+async fn submit_weights_for_epoch(
+    epoch: u64,
+    platform_client: &Arc<PlatformServerClient>,
+    st: &Arc<Subtensor>,
+    sig: &Arc<BittensorSigner>,
+    client: &Arc<RwLock<SubtensorClient>>,
+    cached_challenges: &Arc<RwLock<Vec<ChallengeInfo>>>,
+    netuid: u16,
+    version_key: u64,
+) {
+    info!("=== SUBMITTING WEIGHTS for epoch {} ===", epoch);
+
+    // Get weights from platform-server using cached challenges
+    let challenges = cached_challenges.read().clone();
+    let mechanism_weights = if !challenges.is_empty() {
+        // Collect weights per mechanism using f64 for accurate accumulation
+        let mut mechanism_uid_weights: HashMap<u8, HashMap<u16, f64>> = HashMap::new();
+
+        for challenge in challenges.iter() {
+            if !challenge.is_healthy {
+                info!(
+                    "Challenge {} is unhealthy - skipping (chain keeps existing weights)",
+                    challenge.id
+                );
+                continue;
+            }
+
+            let mech_id = challenge.mechanism_id as u8;
+            let emission_weight = challenge.emission_weight.clamp(0.0, 1.0);
+
+            match platform_client.get_weights(&challenge.id, epoch).await {
+                Ok(w) if !w.is_empty() => {
+                    let uid_weights = mechanism_uid_weights.entry(mech_id).or_default();
+                    let client_guard = client.read();
+                    let mut resolved_count = 0usize;
+                    let mut unresolved_count = 0usize;
+
+                    for (hotkey, weight_f64) in &w {
+                        let scaled_weight = weight_f64 * emission_weight;
+
+                        if let Some(uid) = client_guard.get_uid_for_hotkey(hotkey) {
+                            *uid_weights.entry(uid).or_insert(0.0) += scaled_weight;
+                            resolved_count += 1;
+                            info!(
+                                "  [{}] {} -> UID {} (weight: {:.4} * {:.2} = {:.4})",
+                                challenge.id,
+                                &hotkey[..16.min(hotkey.len())],
+                                uid,
+                                weight_f64,
+                                emission_weight,
+                                scaled_weight
+                            );
+                        } else {
+                            *uid_weights.entry(0).or_insert(0.0) += scaled_weight;
+                            unresolved_count += 1;
+                            warn!(
+                                "  [{}] {} not in metagraph -> UID 0 (burn: {:.4})",
+                                challenge.id,
+                                &hotkey[..16.min(hotkey.len())],
+                                scaled_weight
+                            );
+                        }
+                    }
+                    drop(client_guard);
+
+                    if unresolved_count > 0 {
+                        warn!(
+                            "Challenge {}: {} hotkeys resolved, {} unresolved (sent to burn)",
+                            challenge.id, resolved_count, unresolved_count
+                        );
+                    }
+
+                    let weights_sum: f64 = w.iter().map(|(_, w)| w).sum();
+                    let unallocated = (1.0 - weights_sum.min(1.0)) * emission_weight;
+                    if unallocated > 0.001 {
+                        *uid_weights.entry(0).or_insert(0.0) += unallocated;
+                        info!(
+                            "  [{}] Unallocated -> UID 0 (burn: {:.4})",
+                            challenge.id, unallocated
+                        );
+                    }
+
+                    info!(
+                        "Challenge {} (mech {}, emission={:.2}): collected weights",
+                        challenge.id, mech_id, emission_weight
+                    );
+                }
+                Ok(_) => {
+                    let uid_weights = mechanism_uid_weights.entry(mech_id).or_default();
+                    *uid_weights.entry(0).or_insert(0.0) += emission_weight;
+                    info!(
+                        "Challenge {} returned empty weights - {:.4} burn to UID 0",
+                        challenge.id, emission_weight
+                    );
+                }
+                Err(e) => {
+                    let uid_weights = mechanism_uid_weights.entry(mech_id).or_default();
+                    *uid_weights.entry(0).or_insert(0.0) += emission_weight;
+                    warn!(
+                        "Failed to get weights for {} - {:.4} burn to UID 0: {}",
+                        challenge.id, emission_weight, e
+                    );
+                }
+            }
+        }
+
+        // Add missing emission to burn
+        let total_emission: f64 = challenges
+            .iter()
+            .filter(|c| c.is_healthy)
+            .map(|c| c.emission_weight.clamp(0.0, 1.0))
+            .sum();
+
+        if total_emission < 0.999 {
+            let missing_emission = 1.0 - total_emission;
+            info!(
+                "Total emission from healthy challenges: {:.4}, adding {:.4} to burn",
+                total_emission, missing_emission
+            );
+            if mechanism_uid_weights.is_empty() {
+                mechanism_uid_weights
+                    .entry(0)
+                    .or_default()
+                    .insert(0, missing_emission);
+            } else if let Some((_, uid_weights)) = mechanism_uid_weights.iter_mut().next() {
+                *uid_weights.entry(0).or_insert(0.0) += missing_emission;
+            }
+        }
+
+        // Convert to Vec<(mech, uids, weights_u16)>
+        let mut weights: Vec<(u8, Vec<u16>, Vec<u16>)> = Vec::new();
+
+        for (mech_id, uid_weights) in mechanism_uid_weights {
+            if uid_weights.is_empty() {
+                continue;
+            }
+
+            let total: f64 = uid_weights.values().sum();
+            if total <= 0.0 {
+                warn!(
+                    "Mechanism {} has zero total weight - sending 100% burn",
+                    mech_id
+                );
+                weights.push((mech_id, vec![0u16], vec![65535u16]));
+                continue;
+            }
+
+            let uids: Vec<u16> = uid_weights.keys().copied().collect();
+            let vals_f64: Vec<f64> = uids
+                .iter()
+                .map(|uid| uid_weights.get(uid).copied().unwrap_or(0.0) / total)
+                .collect();
+
+            let max_val = vals_f64.iter().cloned().fold(0.0_f64, f64::max);
+            let vals: Vec<u16> = if max_val > 0.0 {
+                vals_f64
+                    .iter()
+                    .map(|v| ((v / max_val) * 65535.0).round() as u16)
+                    .collect()
+            } else {
+                vec![0u16; uids.len()]
+            };
+
+            info!(
+                "Mechanism {}: {} UIDs, total_weight={:.4} (normalized & max-upscaled)",
+                mech_id,
+                uids.len(),
+                total
+            );
+            debug!("  UIDs: {:?}, Weights: {:?}", uids, vals);
+            weights.push((mech_id, uids, vals));
+        }
+
+        weights
+    } else {
+        info!("No challenges cached from platform-server");
+        vec![]
+    };
+
+    // Submit weights (or burn weights if none)
+    let weights_to_submit = if mechanism_weights.is_empty() {
+        info!("No weights - submitting burn weights to UID 0");
+        vec![(0u8, vec![0u16], vec![65535u16])]
+    } else {
+        mechanism_weights
+    };
+
+    // Submit each mechanism via Subtensor with retry
+    for (mechanism_id, uids, weights) in weights_to_submit {
+        let mut success = false;
+        for attempt in 1..=3 {
+            match st
+                .set_mechanism_weights(
+                    sig,
+                    netuid,
+                    mechanism_id,
+                    &uids,
+                    &weights,
+                    version_key,
+                    ExtrinsicWait::Finalized,
+                )
+                .await
+            {
+                Ok(resp) if resp.success => {
+                    info!(
+                        "Mechanism {} weights submitted: {:?}",
+                        mechanism_id, resp.tx_hash
+                    );
+                    success = true;
+                    break;
+                }
+                Ok(resp) => {
+                    warn!(
+                        "Mechanism {} issue (attempt {}): {}",
+                        mechanism_id, attempt, resp.message
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "Mechanism {} failed (attempt {}): {}",
+                        mechanism_id, attempt, e
+                    );
+                }
+            }
+            if attempt < 3 {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+        if !success {
+            error!(
+                "Mechanism {} weights failed after 3 attempts - will retry next epoch",
+                mechanism_id
+            );
+        }
+    }
+}
+
 async fn handle_block_event(
     event: BlockSyncEvent,
     platform_client: &Arc<PlatformServerClient>,
@@ -910,258 +1195,17 @@ async fn handle_block_event(
                 signer.as_ref(),
                 subtensor_client.as_ref(),
             ) {
-                // Get weights from platform-server using cached challenges
-                // IMPORTANT: Multiple challenges may share the same mechanism_id
-                // We must merge weights by mechanism before submitting
-                let challenges = cached_challenges.read().clone();
-                let mechanism_weights = if !challenges.is_empty() {
-                    // Collect weights per mechanism using f64 for accurate accumulation
-                    // HashMap<mechanism_id, HashMap<uid, weight_f64>>
-                    let mut mechanism_uid_weights: HashMap<u8, HashMap<u16, f64>> = HashMap::new();
-
-                    for challenge in challenges.iter() {
-                        // Skip unhealthy challenges - don't send burn, just skip
-                        // The chain will keep existing weights for this mechanism
-                        if !challenge.is_healthy {
-                            info!(
-                                "Challenge {} is unhealthy - skipping (chain keeps existing weights)",
-                                challenge.id
-                            );
-                            continue;
-                        }
-
-                        let mech_id = challenge.mechanism_id as u8;
-                        let emission_weight = challenge.emission_weight.clamp(0.0, 1.0);
-
-                        match platform_client.get_weights(&challenge.id, epoch).await {
-                            Ok(w) if !w.is_empty() => {
-                                // Get or create the UID->weight map for this mechanism
-                                let uid_weights = mechanism_uid_weights.entry(mech_id).or_default();
-
-                                // Convert hotkeys to UIDs using metagraph
-                                let client_guard = client.read();
-                                let mut resolved_count = 0usize;
-                                let mut unresolved_count = 0usize;
-
-                                for (hotkey, weight_f64) in &w {
-                                    // Scale by emission_weight: this challenge's share
-                                    let scaled_weight = weight_f64 * emission_weight;
-
-                                    if let Some(uid) = client_guard.get_uid_for_hotkey(hotkey) {
-                                        // Accumulate f64 weight for this UID
-                                        *uid_weights.entry(uid).or_insert(0.0) += scaled_weight;
-                                        resolved_count += 1;
-                                        info!(
-                                            "  [{}] {} -> UID {} (weight: {:.4} * {:.2} = {:.4})",
-                                            challenge.id,
-                                            &hotkey[..16],
-                                            uid,
-                                            weight_f64,
-                                            emission_weight,
-                                            scaled_weight
-                                        );
-                                    } else {
-                                        // Hotkey not in metagraph - add to burn (UID 0)
-                                        *uid_weights.entry(0).or_insert(0.0) += scaled_weight;
-                                        unresolved_count += 1;
-                                        warn!(
-                                            "  [{}] {} not in metagraph -> UID 0 (burn: {:.4})",
-                                            challenge.id,
-                                            &hotkey[..16],
-                                            scaled_weight
-                                        );
-                                    }
-                                }
-                                drop(client_guard);
-
-                                if unresolved_count > 0 {
-                                    warn!(
-                                        "Challenge {}: {} hotkeys resolved, {} unresolved (sent to burn)",
-                                        challenge.id, resolved_count, unresolved_count
-                                    );
-                                }
-
-                                // Add (1 - sum_of_weights) * emission_weight to burn
-                                // This handles the case where challenge weights don't sum to 1.0
-                                let weights_sum: f64 = w.iter().map(|(_, w)| w).sum();
-                                let unallocated = (1.0 - weights_sum.min(1.0)) * emission_weight;
-                                if unallocated > 0.001 {
-                                    *uid_weights.entry(0).or_insert(0.0) += unallocated;
-                                    info!(
-                                        "  [{}] Unallocated -> UID 0 (burn: {:.4})",
-                                        challenge.id, unallocated
-                                    );
-                                }
-
-                                info!(
-                                    "Challenge {} (mech {}, emission={:.2}): collected weights",
-                                    challenge.id, mech_id, emission_weight
-                                );
-                            }
-                            Ok(_) => {
-                                // No weights returned - send this challenge's emission to burn
-                                let uid_weights = mechanism_uid_weights.entry(mech_id).or_default();
-                                *uid_weights.entry(0).or_insert(0.0) += emission_weight;
-                                info!(
-                                    "Challenge {} returned empty weights - {:.4} burn to UID 0",
-                                    challenge.id, emission_weight
-                                );
-                            }
-                            Err(e) => {
-                                // Error fetching weights - send this challenge's emission to burn
-                                let uid_weights = mechanism_uid_weights.entry(mech_id).or_default();
-                                *uid_weights.entry(0).or_insert(0.0) += emission_weight;
-                                warn!(
-                                    "Failed to get weights for {} - {:.4} burn to UID 0: {}",
-                                    challenge.id, emission_weight, e
-                                );
-                            }
-                        }
-                    }
-
-                    // Add missing emission to burn (UID 0) to ensure weights sum to 1.0
-                    // This preserves the correct proportions for each challenge's emission_weight
-                    let total_emission: f64 = challenges
-                        .iter()
-                        .filter(|c| c.is_healthy)
-                        .map(|c| c.emission_weight.clamp(0.0, 1.0))
-                        .sum();
-
-                    if total_emission < 0.999 {
-                        let missing_emission = 1.0 - total_emission;
-                        info!(
-                            "Total emission from healthy challenges: {:.4}, adding {:.4} to burn",
-                            total_emission, missing_emission
-                        );
-                        // Add missing emission to burn for each mechanism that has weights
-                        // If no mechanisms have weights yet, create one for mechanism 0
-                        if mechanism_uid_weights.is_empty() {
-                            mechanism_uid_weights
-                                .entry(0)
-                                .or_default()
-                                .insert(0, missing_emission);
-                        } else {
-                            // Distribute missing emission proportionally across mechanisms
-                            // For simplicity, add to the first mechanism (they share the same burn UID 0)
-                            if let Some((_, uid_weights)) = mechanism_uid_weights.iter_mut().next()
-                            {
-                                *uid_weights.entry(0).or_insert(0.0) += missing_emission;
-                            }
-                        }
-                    }
-
-                    // Convert HashMap<mechanism_id, HashMap<uid, weight_f64>> to Vec<(mech, uids, weights_u16)>
-                    let mut weights: Vec<(u8, Vec<u16>, Vec<u16>)> = Vec::new();
-
-                    for (mech_id, uid_weights) in mechanism_uid_weights {
-                        if uid_weights.is_empty() {
-                            continue;
-                        }
-
-                        // Total should now be ~1.0 after adding missing emission
-                        let total: f64 = uid_weights.values().sum();
-                        if total <= 0.0 {
-                            // Should not happen, but fallback to 100% burn
-                            warn!(
-                                "Mechanism {} has zero total weight - sending 100% burn",
-                                mech_id
-                            );
-                            weights.push((mech_id, vec![0u16], vec![65535u16]));
-                            continue;
-                        }
-
-                        let uids: Vec<u16> = uid_weights.keys().copied().collect();
-                        // Normalize by total (should be ~1.0 now)
-                        let vals_f64: Vec<f64> = uids
-                            .iter()
-                            .map(|uid| uid_weights.get(uid).copied().unwrap_or(0.0) / total)
-                            .collect();
-
-                        // Max-upscale: largest weight becomes 65535
-                        // This matches Python's convert_weights_and_uids_for_emit behavior
-                        let max_val = vals_f64.iter().cloned().fold(0.0_f64, f64::max);
-                        let vals: Vec<u16> = if max_val > 0.0 {
-                            vals_f64
-                                .iter()
-                                .map(|v| ((v / max_val) * 65535.0).round() as u16)
-                                .collect()
-                        } else {
-                            vec![0u16; uids.len()]
-                        };
-
-                        info!(
-                            "Mechanism {}: {} UIDs, total_weight={:.4} (normalized & max-upscaled)",
-                            mech_id,
-                            uids.len(),
-                            total
-                        );
-                        debug!("  UIDs: {:?}, Weights: {:?}", uids, vals);
-                        weights.push((mech_id, uids, vals));
-                    }
-
-                    weights
-                } else {
-                    info!("No challenges cached from platform-server");
-                    vec![]
-                };
-
-                // Submit weights (or burn weights if none)
-                let weights_to_submit = if mechanism_weights.is_empty() {
-                    info!("No weights - submitting burn weights to UID 0");
-                    vec![(0u8, vec![0u16], vec![65535u16])]
-                } else {
-                    mechanism_weights
-                };
-
-                // Submit each mechanism via Subtensor (handles CRv4 automatically)
-                // Retry up to 3 times on failure
-                for (mechanism_id, uids, weights) in weights_to_submit {
-                    let mut success = false;
-                    for attempt in 1..=3 {
-                        match st
-                            .set_mechanism_weights(
-                                sig,
-                                netuid,
-                                mechanism_id,
-                                &uids,
-                                &weights,
-                                version_key,
-                                ExtrinsicWait::Finalized,
-                            )
-                            .await
-                        {
-                            Ok(resp) if resp.success => {
-                                info!(
-                                    "Mechanism {} weights submitted: {:?}",
-                                    mechanism_id, resp.tx_hash
-                                );
-                                success = true;
-                                break;
-                            }
-                            Ok(resp) => {
-                                warn!(
-                                    "Mechanism {} issue (attempt {}): {}",
-                                    mechanism_id, attempt, resp.message
-                                );
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Mechanism {} failed (attempt {}): {}",
-                                    mechanism_id, attempt, e
-                                );
-                            }
-                        }
-                        if attempt < 3 {
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                        }
-                    }
-                    if !success {
-                        error!(
-                            "Mechanism {} weights failed after 3 attempts - will retry next epoch",
-                            mechanism_id
-                        );
-                    }
-                }
+                submit_weights_for_epoch(
+                    epoch,
+                    platform_client,
+                    st,
+                    sig,
+                    client,
+                    cached_challenges,
+                    netuid,
+                    version_key,
+                )
+                .await;
             } else {
                 warn!("No Subtensor/signer - cannot submit weights");
             }
