@@ -3,15 +3,19 @@ use platform_distributed_storage::{
     DistributedStore, GetOptions as DGetOptions, LocalStorage, PutOptions as DPutOptions,
     StorageKey as DStorageKey,
 };
-use platform_p2p_consensus::{P2PCommand, P2PMessage, StorageProposalMessage};
+use platform_p2p_consensus::{P2PCommand, P2PMessage, StorageProposal, StorageProposalMessage};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use wasm_runtime_interface::storage::{StorageBackend, StorageHostError};
 
+/// Channel for local storage proposals (proposer adds to own state)
+pub type LocalProposalSender = mpsc::Sender<StorageProposal>;
+
 pub struct ChallengeStorageBackend {
     storage: Arc<LocalStorage>,
     p2p_tx: Option<mpsc::Sender<P2PCommand>>,
+    local_proposal_tx: Option<LocalProposalSender>,
     keypair: Option<Keypair>,
 }
 
@@ -20,6 +24,7 @@ impl ChallengeStorageBackend {
         Self {
             storage,
             p2p_tx: None,
+            local_proposal_tx: None,
             keypair: None,
         }
     }
@@ -27,11 +32,13 @@ impl ChallengeStorageBackend {
     pub fn with_p2p(
         storage: Arc<LocalStorage>,
         p2p_tx: mpsc::Sender<P2PCommand>,
+        local_proposal_tx: LocalProposalSender,
         keypair: Keypair,
     ) -> Self {
         Self {
             storage,
             p2p_tx: Some(p2p_tx),
+            local_proposal_tx: Some(local_proposal_tx),
             keypair: Some(keypair),
         }
     }
@@ -98,7 +105,29 @@ impl StorageBackend for ChallengeStorageBackend {
             });
 
             // Fire and forget - don't block WASM execution on P2P
+            tracing::info!(
+                proposal_id = %hex::encode(&proposal_id[..8]),
+                challenge_id = %challenge_id,
+                key_len = key.len(),
+                value_len = value.len(),
+                "Broadcasting storage proposal via P2P"
+            );
             let _ = tx.try_send(P2PCommand::Broadcast(msg));
+
+            // Also add the proposal to our local state (we don't receive our own broadcasts)
+            if let Some(local_tx) = &self.local_proposal_tx {
+                let local_proposal = StorageProposal {
+                    proposal_id,
+                    challenge_id: ChallengeId(challenge_uuid),
+                    proposer: kp.hotkey(),
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    timestamp,
+                    votes: std::collections::HashMap::new(),
+                    finalized: false,
+                };
+                let _ = local_tx.try_send(local_proposal);
+            }
         } else {
             // No P2P configured - write locally for single-node/test mode
             let storage_key = build_challenge_storage_key(challenge_id, key);

@@ -282,6 +282,24 @@ async fn main() -> Result<()> {
     let validator_hotkey = keypair.ss58_address();
     info!("Validator hotkey: {}", validator_hotkey);
 
+    // Initialize Sentry for error tracking with validator hotkey as identifier
+    let _sentry_guard = sentry::init((
+        "https://fb4324072ce6cfa8cb8a772ca37d1b19@o4510579978272768.ingest.us.sentry.io/4510934791094272",
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            send_default_pii: true,
+            ..Default::default()
+        },
+    ));
+    sentry::configure_scope(|scope| {
+        scope.set_user(Some(sentry::User {
+            id: Some(validator_hotkey.clone()),
+            username: Some(validator_hotkey.clone()),
+            ..Default::default()
+        }));
+        scope.set_tag("validator_hotkey", &validator_hotkey);
+    });
+
     // Create data directory
     std::fs::create_dir_all(&args.data_dir)?;
     let data_dir = std::fs::canonicalize(&args.data_dir)?;
@@ -574,6 +592,10 @@ async fn main() -> Result<()> {
     let challenges_subdir = wasm_module_dir.join("challenges");
     std::fs::create_dir_all(&challenges_subdir)?;
 
+    // Channel for local storage proposals (proposer adds to own state)
+    let (local_proposal_tx, mut local_proposal_rx) =
+        tokio::sync::mpsc::channel::<StorageProposal>(256);
+
     let wasm_executor = match WasmChallengeExecutor::new(WasmExecutorConfig {
         module_dir: wasm_module_dir.clone(),
         max_memory_bytes: args.wasm_max_memory,
@@ -583,6 +605,7 @@ async fn main() -> Result<()> {
         storage_backend: std::sync::Arc::new(challenge_storage::ChallengeStorageBackend::with_p2p(
             Arc::clone(&storage),
             p2p_cmd_tx.clone(),
+            local_proposal_tx,
             keypair.clone(),
         )),
         chutes_api_key: None,
@@ -1231,6 +1254,23 @@ async fn main() -> Result<()> {
                 if let Err(e) = persist_core_state_to_storage(&storage, &chain_state).await {
                     warn!("Failed to persist core state: {}", e);
                 }
+            }
+
+            // Local storage proposals (from our own WASM executions)
+            Some(proposal) = local_proposal_rx.recv() => {
+                debug!(
+                    proposal_id = %hex::encode(&proposal.proposal_id[..8]),
+                    challenge_id = %proposal.challenge_id,
+                    "Adding local storage proposal to state"
+                );
+                state_manager.apply(|state| {
+                    state.add_storage_proposal(proposal.clone());
+                });
+                // Also vote for our own proposal
+                let my_hotkey = keypair.hotkey();
+                state_manager.apply(|state| {
+                    state.vote_storage_proposal(&proposal.proposal_id, my_hotkey, true);
+                });
             }
 
             // Metagraph refresh

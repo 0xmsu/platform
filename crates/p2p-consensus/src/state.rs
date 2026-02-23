@@ -13,6 +13,127 @@ use std::collections::HashMap;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+/// Serde module for HashMap<Hotkey, V> - serializes keys as hex strings
+mod hotkey_map_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S, V: Serialize>(
+        map: &HashMap<Hotkey, V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut map_ser = serializer.serialize_map(Some(map.len()))?;
+        for (k, v) in map {
+            map_ser.serialize_entry(&k.to_hex(), v)?;
+        }
+        map_ser.end()
+    }
+
+    pub fn deserialize<'de, D, V: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<Hotkey, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let string_map: HashMap<String, V> = HashMap::deserialize(deserializer)?;
+        let mut result = HashMap::new();
+        for (k, v) in string_map {
+            if let Some(hotkey) = Hotkey::from_hex(&k) {
+                result.insert(hotkey, v);
+            }
+        }
+        Ok(result)
+    }
+}
+
+/// Serde module for HashMap<[u8; 32], V> - serializes keys as hex strings
+mod bytes32_map_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S, V: Serialize>(
+        map: &HashMap<[u8; 32], V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut map_ser = serializer.serialize_map(Some(map.len()))?;
+        for (k, v) in map {
+            map_ser.serialize_entry(&hex::encode(k), v)?;
+        }
+        map_ser.end()
+    }
+
+    pub fn deserialize<'de, D, V: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<[u8; 32], V>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let string_map: HashMap<String, V> = HashMap::deserialize(deserializer)?;
+        let mut result = HashMap::new();
+        for (k, v) in string_map {
+            if let Ok(bytes) = hex::decode(&k) {
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    result.insert(arr, v);
+                }
+            }
+        }
+        Ok(result)
+    }
+}
+
+/// Serde module for HashMap<String, HashMap<Hotkey, V>>
+mod nested_hotkey_map_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S, V: Serialize>(
+        map: &HashMap<String, HashMap<Hotkey, V>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut map_ser = serializer.serialize_map(Some(map.len()))?;
+        for (outer_k, inner_map) in map {
+            let inner: HashMap<String, &V> =
+                inner_map.iter().map(|(k, v)| (k.to_hex(), v)).collect();
+            map_ser.serialize_entry(outer_k, &inner)?;
+        }
+        map_ser.end()
+    }
+
+    pub fn deserialize<'de, D, V: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<String, HashMap<Hotkey, V>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let outer: HashMap<String, HashMap<String, V>> = HashMap::deserialize(deserializer)?;
+        let mut result = HashMap::new();
+        for (outer_k, inner_map) in outer {
+            let mut inner = HashMap::new();
+            for (k, v) in inner_map {
+                if let Some(hotkey) = Hotkey::from_hex(&k) {
+                    inner.insert(hotkey, v);
+                }
+            }
+            result.insert(outer_k, inner);
+        }
+        Ok(result)
+    }
+}
+
 const MAX_STATE_DESERIALIZATION_SIZE: u64 = 256 * 1024 * 1024;
 
 /// Maximum size of agent log data in bytes (256 KB)
@@ -165,6 +286,7 @@ pub struct ChainState {
     /// State hash
     pub state_hash: [u8; 32],
     /// Active validators (hotkey -> stake)
+    #[serde(default, with = "hotkey_map_serde")]
     pub validators: HashMap<Hotkey, u64>,
     /// Active challenges
     pub challenges: HashMap<ChallengeId, ChallengeConfig>,
@@ -202,25 +324,25 @@ pub struct ChainState {
     #[serde(default)]
     pub review_assignments: HashMap<String, Vec<ReviewRecord>>,
     /// Agent logs awaiting consensus (submission_id -> validator_hotkey -> serialized logs)
-    #[serde(default)]
+    #[serde(default, with = "nested_hotkey_map_serde")]
     pub agent_log_proposals: HashMap<String, HashMap<Hotkey, Vec<u8>>>,
     /// Consensus-validated agent logs (submission_id -> validated logs)
     #[serde(default)]
     pub validated_agent_logs: HashMap<String, Vec<u8>>,
     /// Stored agent code registry (miner_hotkey -> latest agent code entry)
-    #[serde(default)]
+    #[serde(default, with = "hotkey_map_serde")]
     pub agent_code_registry: HashMap<Hotkey, AgentCodeEntry>,
     /// Whether the network is in the bootstrap period (UID 0 dominance)
     #[serde(default)]
     pub bootstrap_active: bool,
     /// Pending storage proposals awaiting consensus (proposal_id -> proposal)
-    #[serde(default)]
+    #[serde(default, with = "bytes32_map_serde")]
     pub pending_storage_proposals: HashMap<[u8; 32], StorageProposal>,
     /// Pending state mutation proposals awaiting consensus (proposal_id -> proposal)
-    #[serde(default)]
+    #[serde(default, with = "bytes32_map_serde")]
     pub pending_state_mutations: HashMap<[u8; 32], StateMutationEntry>,
     /// Validator penalty counters (hotkey -> consecutive epochs penalized)
-    #[serde(default)]
+    #[serde(default, with = "hotkey_map_serde")]
     pub validator_penalties: HashMap<Hotkey, u32>,
 }
 
@@ -511,9 +633,14 @@ impl ChainState {
             if proposal.finalized {
                 return None;
             }
-            proposal.votes.insert(voter, approve);
+            proposal.votes.insert(voter.clone(), approve);
 
             if total_stake == 0 {
+                tracing::warn!(
+                    proposal_id = %hex::encode(&proposal_id[..8]),
+                    validators_count = self.validators.len(),
+                    "Storage consensus: total_stake is 0, no validators registered"
+                );
                 return Some(false);
             }
 
@@ -526,6 +653,16 @@ impl ChainState {
                 .sum();
 
             let threshold = total_stake * 35 / 100;
+
+            tracing::debug!(
+                proposal_id = %hex::encode(&proposal_id[..8]),
+                voter = %voter.to_ss58(),
+                approve_stake = approve_stake,
+                threshold = threshold,
+                total_stake = total_stake,
+                votes_count = proposal.votes.len(),
+                "Storage proposal vote received"
+            );
 
             if approve_stake >= threshold {
                 proposal.finalized = true;
