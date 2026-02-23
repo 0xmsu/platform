@@ -59,6 +59,7 @@ pub enum RpcP2PCommand {
         challenge_id: ChallengeId,
         update_type: String,
         data: Vec<u8>,
+        name: Option<String>,
     },
     /// Broadcast a SudoAction (config/emission/weight changes)
     BroadcastSudoAction { action: platform_core::SudoAction },
@@ -1092,6 +1093,7 @@ async fn sudo_challenge_handler(
             challenge_id,
             update_type: request.action.clone(),
             data,
+            name: request.name.clone(),
         };
 
         if let Err(e) = tx.send(cmd).await {

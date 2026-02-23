@@ -587,6 +587,9 @@ pub struct ChallengeUpdateMessage {
     pub update_type: String,
     /// Serialized update data
     pub data: Vec<u8>,
+    /// Challenge name (for wasm_upload)
+    #[serde(default)]
+    pub name: Option<String>,
     /// Update timestamp
     pub timestamp: i64,
     /// Updater's signature

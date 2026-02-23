@@ -715,9 +715,9 @@ async fn main() -> Result<()> {
                 "Reloading {} WASM modules from persisted state",
                 challenges.len()
             );
+            let mut handles = Vec::new();
             for (challenge_id, module_path) in &challenges {
                 let challenge_id_str = challenge_id.to_string();
-                // Try to load WASM bytes from distributed storage
                 let wasm_key =
                     platform_distributed_storage::StorageKey::new("wasm", &challenge_id_str);
                 match storage
@@ -730,12 +730,14 @@ async fn main() -> Result<()> {
                     Ok(Some(stored)) => {
                         let exec = executor.clone();
                         let cid = *challenge_id;
-                        let cid_str = challenge_id_str.clone();
-                        let mp = module_path.clone();
+                        let mp = if module_path.is_empty() {
+                            challenge_id_str.clone()
+                        } else {
+                            module_path.clone()
+                        };
                         let cs = chain_state.clone();
                         let wasm_bytes = stored.data;
-                        std::thread::spawn(move || {
-                            // Cache the compiled module
+                        let handle = std::thread::spawn(move || {
                             match exec.execute_get_routes_from_bytes(
                                 &mp,
                                 &wasm_bytes,
@@ -776,6 +778,7 @@ async fn main() -> Result<()> {
                                 }
                             }
                         });
+                        handles.push((challenge_id_str, handle));
                     }
                     Ok(None) => {
                         warn!(
@@ -792,8 +795,13 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            // Give threads time to compile
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            // Wait for all WASM compilation threads to finish
+            for (cid, handle) in handles {
+                if let Err(e) = handle.join() {
+                    warn!(challenge_id = %cid, "WASM compilation thread panicked: {:?}", e);
+                }
+            }
+            info!("All WASM modules reloaded");
         }
     }
 
@@ -884,6 +892,7 @@ async fn main() -> Result<()> {
                             updater: keypair.hotkey(),
                             update_type: "sudo_action".to_string(),
                             data: action_bytes,
+                            name: None,
                             timestamp,
                             signature: signature.signature.to_vec(),
                         };
@@ -895,11 +904,12 @@ async fn main() -> Result<()> {
                             info!("Sudo action broadcast to P2P network");
                         }
                     }
-                    platform_rpc::RpcP2PCommand::BroadcastChallengeUpdate { challenge_id, update_type, data } => {
+                    platform_rpc::RpcP2PCommand::BroadcastChallengeUpdate { challenge_id, update_type, data, name } => {
                         info!(
                             challenge_id = %challenge_id,
                             update_type = %update_type,
                             data_bytes = data.len(),
+                            name = ?name,
                             "Broadcasting ChallengeUpdate from RPC"
                         );
 
@@ -913,6 +923,7 @@ async fn main() -> Result<()> {
                             updater: keypair.hotkey(),
                             update_type: update_type.clone(),
                             data: data.clone(),
+                            name: name.clone(),
                             timestamp,
                             signature: signature.signature.to_vec(),
                         };
@@ -960,14 +971,14 @@ async fn main() -> Result<()> {
 
                                         // Sync to ChainState for RPC
                                         {
+                                            let challenge_name = name.as_deref().unwrap_or(&challenge_id_str).to_string();
                                             let mut cs = chain_state.write();
                                             let wasm_config = platform_core::WasmChallengeConfig {
                                                 challenge_id,
-                                                name: challenge_id_str.clone(),
+                                                name: challenge_name,
                                                 description: String::new(),
                                                 owner: keypair.hotkey(),
                                                 module: platform_core::WasmModuleMetadata {
-                                                    // Use challenge_id as module_path for cache lookup
                                                     module_path: challenge_id_str.clone(),
                                                     code_hash: hex::encode(metadata.value_hash),
                                                     version: metadata.version.to_string(),
@@ -1717,13 +1728,20 @@ async fn handle_network_event(
                                             size_bytes = update.data.len(),
                                             "Stored WASM module in distributed storage"
                                         );
+                                        // Use name from P2P message, fallback to UUID
+                                        let challenge_name = update
+                                            .name
+                                            .as_deref()
+                                            .unwrap_or(&challenge_id_str)
+                                            .to_string();
+
                                         // Register challenge in state if not exists
                                         state_manager.apply(|state| {
                                             if state.get_challenge(&update.challenge_id).is_none() {
                                                 let challenge_config =
                                                     platform_p2p_consensus::ChallengeConfig {
                                                         id: update.challenge_id,
-                                                        name: challenge_id_str.clone(),
+                                                        name: challenge_name.clone(),
                                                         weight: 100, // Default weight
                                                         is_active: true,
                                                         creator: update.updater.clone(),
@@ -1740,11 +1758,11 @@ async fn handle_network_event(
                                             let mut cs = chain_state.write();
                                             let wasm_config = platform_core::WasmChallengeConfig {
                                                 challenge_id: update.challenge_id,
-                                                name: challenge_id_str.clone(),
+                                                name: challenge_name,
                                                 description: String::new(),
                                                 owner: update.updater.clone(),
                                                 module: platform_core::WasmModuleMetadata {
-                                                    module_path: String::new(),
+                                                    module_path: challenge_id_str.clone(),
                                                     code_hash: hex::encode(metadata.value_hash),
                                                     version: metadata.version.to_string(),
                                                     ..Default::default()
@@ -1876,9 +1894,11 @@ async fn handle_network_event(
                         }
                     }
 
-                    // Invalidate WASM cache
-                    if let Some(ref executor) = wasm_executor_ref {
-                        executor.invalidate_cache(&challenge_id_str);
+                    // Invalidate WASM cache (skip for wasm_upload - module was just compiled fresh)
+                    if update.update_type != "wasm_upload" {
+                        if let Some(ref executor) = wasm_executor_ref {
+                            executor.invalidate_cache(&challenge_id_str);
+                        }
                     }
                 } else {
                     warn!(
