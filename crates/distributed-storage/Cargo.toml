@@ -33,6 +33,9 @@ parking_lot = { workspace = true }
 uuid = { workspace = true }
 base64 = "0.22"
 
+# Compression
+lz4_flex = "0.11"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio-test = { workspace = true }

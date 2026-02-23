@@ -486,8 +486,9 @@ impl DistributedStorage {
 
         // Restore pending ops from disk
         let mut restored_ops = HashMap::new();
-        for item in pending_ops_tree.iter() {
-            if let Ok((key, value)) = item {
+        for item in pending_ops_tree.iter().flatten() {
+            {
+                let (key, value) = item;
                 if let Ok(op) = bincode::deserialize::<WriteOp>(&value) {
                     let mut op_id = [0u8; 32];
                     if key.len() == 32 {
@@ -600,7 +601,7 @@ impl DistributedStorage {
 
         self.pending_ops.write().insert(op.op_id, op.clone());
         if let Ok(data) = bincode::serialize(&op) {
-            let _ = self.pending_ops_tree.insert(&op.op_id, data);
+            let _ = self.pending_ops_tree.insert(op.op_id, data);
         }
         self.stats.write().write_ops_pending = self.pending_ops.read().len();
 
@@ -676,7 +677,7 @@ impl DistributedStorage {
 
         self.pending_ops.write().insert(op.op_id, op.clone());
         if let Ok(data) = bincode::serialize(&op) {
-            let _ = self.pending_ops_tree.insert(&op.op_id, data);
+            let _ = self.pending_ops_tree.insert(op.op_id, data);
         }
         self.stats.write().write_ops_pending = self.pending_ops.read().len();
 

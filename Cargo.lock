@@ -5572,6 +5572,7 @@ dependencies = [
  "chrono",
  "futures",
  "hex",
+ "lz4_flex",
  "parking_lot 0.12.5",
  "platform-core",
  "serde",

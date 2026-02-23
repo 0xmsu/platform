@@ -53,6 +53,7 @@ impl Default for RpcConfig {
 
 /// Command for broadcasting P2P messages from RPC
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum RpcP2PCommand {
     /// Broadcast a ChallengeUpdate message
     BroadcastChallengeUpdate {
@@ -1231,11 +1232,7 @@ async fn sudo_action_handler(
     };
 
     // Sign format: "sudo:action:{action_json}:{timestamp}"
-    let msg_to_sign = format!(
-        "sudo:action:{}:{}",
-        request.action.to_string(),
-        request.timestamp
-    );
+    let msg_to_sign = format!("sudo:action:{}:{}", request.action, request.timestamp);
 
     let signature = match sp_core::sr25519::Signature::try_from(signature_bytes.as_slice()) {
         Ok(sig) => sig,

@@ -1,22 +1,22 @@
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use platform_challenge_sdk_wasm::{EvaluationInput, EvaluationOutput, WeightEntry};
-use platform_distributed_storage::DistributedStore;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info};
 use wasm_runtime_interface::{
-    ConsensusPolicy, ExecPolicy, InMemoryStorageBackend, InstanceConfig, LlmPolicy,
-    NetworkHostFunctions, NetworkPolicy, RuntimeConfig, SandboxPolicy, StorageBackend,
-    StorageHostConfig, TerminalPolicy, TimePolicy, WasmModule, WasmRuntime, WasmRuntimeError,
+    ConsensusPolicy, ExecPolicy, InMemoryStorageBackend, InstanceConfig, LlmPolicy, NetworkPolicy,
+    RuntimeConfig, SandboxPolicy, StorageBackend, StorageHostConfig, TerminalPolicy, TimePolicy,
+    WasmModule, WasmRuntime, WasmRuntimeError,
 };
 
 const MAX_EVALUATION_OUTPUT_SIZE: usize = 64 * 1024 * 1024;
 const MAX_ROUTE_OUTPUT_SIZE: u64 = 16 * 1024 * 1024;
 const MAX_TASK_OUTPUT_SIZE: u64 = 16 * 1024 * 1024;
 
+#[allow(dead_code)]
 pub struct WasmExecutorConfig {
     pub module_dir: PathBuf,
     pub max_memory_bytes: u64,
@@ -26,7 +26,7 @@ pub struct WasmExecutorConfig {
     pub storage_backend: Arc<dyn StorageBackend>,
     pub chutes_api_key: Option<String>,
     /// Optional distributed storage for loading WASM modules
-    pub distributed_storage: Option<Arc<platform_distributed_storage::LocalStorage>>,
+    pub distributed_storage: Option<Arc<dyn platform_distributed_storage::DistributedStore>>,
 }
 
 impl std::fmt::Debug for WasmExecutorConfig {
@@ -912,6 +912,7 @@ impl WasmChallengeExecutor {
     /// Execute get_weights on a WASM challenge module.
     /// Returns Vec<WeightAssignment> with hotkey (SS58/hex) + f64 weight.
     /// The caller is responsible for converting hotkeys to UIDs via metagraph.
+    #[allow(dead_code)]
     pub fn execute_get_weights(
         &self,
         module_path: &str,
@@ -999,6 +1000,7 @@ impl WasmChallengeExecutor {
 
     /// Execute sync on a WASM challenge module.
     /// Returns WasmSyncResult with leaderboard hash and stats for consensus.
+    #[allow(dead_code)]
     pub fn execute_sync(
         &self,
         module_path: &str,
@@ -1205,6 +1207,7 @@ impl WasmChallengeExecutor {
     }
 
     /// Async version that also checks distributed storage
+    #[allow(dead_code)]
     pub async fn module_exists_async(&self, module_path: &str) -> bool {
         // Check module cache first
         if self.module_cache.read().contains_key(module_path) {

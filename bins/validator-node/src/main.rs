@@ -3,6 +3,11 @@
 //! Fully decentralized P2P validator for the Platform network.
 //! Uses libp2p for gossipsub consensus and Kademlia DHT for storage.
 //! Submits weights to Bittensor at epoch boundaries.
+#![allow(
+    clippy::too_many_arguments,
+    clippy::await_holding_lock,
+    clippy::needless_borrow
+)]
 
 mod challenge_storage;
 mod wasm_executor;
@@ -23,8 +28,8 @@ use platform_core::{
     ChallengeId, Hotkey, Keypair, SUDO_KEY_SS58,
 };
 use platform_distributed_storage::{
-    DistributedStore, DistributedStoreExt, LocalStorage, LocalStorageBuilder, PutOptions,
-    StorageKey,
+    DistributedStore, DistributedStoreExt, LocalStorageBuilder, PutOptions, StorageKey,
+    TrackedStorage, TrackedStorageConfig,
 };
 use platform_epoch::{EpochConfig, WeightAggregator};
 use platform_p2p_consensus::{
@@ -69,7 +74,7 @@ fn sanitize_for_log(s: &str) -> String {
 /// Helper to mutate ChainState and automatically persist changes.
 /// This ensures we never forget to persist after mutations.
 async fn mutate_and_persist<F, R>(
-    storage: Arc<LocalStorage>,
+    storage: Arc<TrackedStorage>,
     chain_state: Arc<RwLock<platform_core::ChainState>>,
     operation: &str,
     f: F,
@@ -349,8 +354,8 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&args.data_dir)?;
     let data_dir = std::fs::canonicalize(&args.data_dir)?;
 
-    // Initialize distributed storage
-    let storage = LocalStorageBuilder::new(&validator_hotkey)
+    // Initialize distributed storage with compression and tracking
+    let local_storage = LocalStorageBuilder::new(&validator_hotkey)
         .path(
             data_dir
                 .join("distributed.db")
@@ -358,8 +363,15 @@ async fn main() -> Result<()> {
                 .to_string(),
         )
         .build()?;
-    let storage = Arc::new(storage);
-    info!("Distributed storage initialized");
+
+    // Wrap with TrackedStorage for automatic compression, indexing, and audit
+    let tracked_config = TrackedStorageConfig {
+        validator_id: validator_hotkey.clone(),
+        ..Default::default()
+    };
+    let tracked_storage = TrackedStorage::new(Arc::new(local_storage), tracked_config);
+    let storage = Arc::new(tracked_storage);
+    info!("Distributed storage initialized with compression and tracking");
 
     // Determine listen address - p2p_port overrides listen_addr if specified
     let listen_addr = if let Some(port) = args.p2p_port {
@@ -641,6 +653,8 @@ async fn main() -> Result<()> {
     let (local_proposal_tx, mut local_proposal_rx) =
         tokio::sync::mpsc::channel::<StorageProposal>(256);
 
+    // Cast storage to trait object for WASM executor
+    let storage_dyn: Arc<dyn DistributedStore> = Arc::clone(&storage) as Arc<dyn DistributedStore>;
     let wasm_executor = match WasmChallengeExecutor::new(WasmExecutorConfig {
         module_dir: wasm_module_dir.clone(),
         max_memory_bytes: args.wasm_max_memory,
@@ -648,13 +662,13 @@ async fn main() -> Result<()> {
         fuel_limit: args.wasm_fuel_limit,
         storage_host_config: wasm_runtime_interface::StorageHostConfig::default(),
         storage_backend: std::sync::Arc::new(challenge_storage::ChallengeStorageBackend::with_p2p(
-            Arc::clone(&storage),
+            storage_dyn.clone(),
             p2p_cmd_tx.clone(),
             local_proposal_tx,
             keypair.clone(),
         )),
         chutes_api_key: None,
-        distributed_storage: Some(Arc::clone(&storage)),
+        distributed_storage: Some(storage_dyn),
     }) {
         Ok(executor) => {
             info!(
@@ -921,6 +935,7 @@ async fn main() -> Result<()> {
     let mut challenge_sync_interval = tokio::time::interval(Duration::from_secs(60)); // Check every minute
     let mut last_sync_block: u64 = 0; // Last block where sync was triggered
     let sync_block_interval: u64 = 60; // Sync every 60 blocks
+    let mut storage_stats_interval = tokio::time::interval(Duration::from_secs(300)); // Log stats every 5 min
 
     // Clone p2p_cmd_tx for use in the loop
     let p2p_broadcast_tx = p2p_cmd_tx.clone();
@@ -960,6 +975,7 @@ async fn main() -> Result<()> {
                     &wasm_executor,
                     &keypair,
                     &chain_state,
+                    &storage,
                 ).await;
             }
 
@@ -1107,7 +1123,7 @@ async fn main() -> Result<()> {
                                 let challenge_id_str = challenge_id.to_string();
                                 let wasm_key = StorageKey::new("wasm", &challenge_id_str);
                                 let wasm_data = data.clone(); // Clone for route loading later
-                                match storage.put(wasm_key, data, PutOptions::default()).await {
+                                match storage.put(wasm_key, data, put_options_with_block(&state_manager)).await {
                                     Ok(metadata) => {
                                         info!(
                                             challenge_id = %challenge_id,
@@ -1365,7 +1381,7 @@ async fn main() -> Result<()> {
                         let result = if p.value.is_empty() {
                             storage.delete(&storage_key).await
                         } else {
-                            storage.put(storage_key.clone(), p.value.clone(), PutOptions::default()).await.map(|_| true)
+                            storage.put(storage_key.clone(), p.value.clone(), put_options_with_block(&state_manager)).await.map(|_| true)
                         };
                         match result {
                             Ok(_) => {
@@ -1579,6 +1595,28 @@ async fn main() -> Result<()> {
                 }
             }
 
+            // Periodic storage stats logging
+            _ = storage_stats_interval.tick() => {
+                let stats = storage.tracked_stats().await;
+                if stats.total_writes > 0 {
+                    let savings = if stats.bytes_written_uncompressed > 0 {
+                        100.0 * (1.0 - stats.compression_ratio)
+                    } else {
+                        0.0
+                    };
+                    info!(
+                        total_writes = stats.total_writes,
+                        total_reads = stats.total_reads,
+                        uncompressed_bytes = stats.bytes_written_uncompressed,
+                        compressed_bytes = stats.bytes_written_compressed,
+                        compression_ratio = format!("{:.2}", stats.compression_ratio),
+                        savings_pct = format!("{:.1}%", savings),
+                        current_block = storage.current_block(),
+                        "Storage statistics"
+                    );
+                }
+            }
+
             // Ctrl+C
             _ = tokio::signal::ctrl_c() => {
                 info!("Received shutdown signal, persisting state...");
@@ -1649,7 +1687,10 @@ fn load_keypair(args: &Args) -> Result<Keypair> {
 }
 
 /// Load persisted state from distributed storage
-async fn load_state_from_storage(storage: &Arc<LocalStorage>, netuid: u16) -> Option<StateManager> {
+async fn load_state_from_storage(
+    storage: &Arc<TrackedStorage>,
+    netuid: u16,
+) -> Option<StateManager> {
     let key = StorageKey::new("state", STATE_STORAGE_KEY);
     match storage.get_json::<ChainState>(&key).await {
         Ok(Some(state)) => {
@@ -1682,7 +1723,7 @@ async fn load_state_from_storage(storage: &Arc<LocalStorage>, netuid: u16) -> Op
 
 /// Persist current state to distributed storage
 async fn persist_state_to_storage(
-    storage: &Arc<LocalStorage>,
+    storage: &Arc<TrackedStorage>,
     state_manager: &Arc<StateManager>,
 ) -> Result<()> {
     let state = state_manager.snapshot();
@@ -1693,7 +1734,7 @@ async fn persist_state_to_storage(
 
 /// Load persisted core ChainState (wasm_challenge_configs, routes, etc.)
 async fn load_core_state_from_storage(
-    storage: &Arc<LocalStorage>,
+    storage: &Arc<TrackedStorage>,
 ) -> Option<platform_core::ChainState> {
     let key = StorageKey::new("state", CORE_STATE_STORAGE_KEY);
     match storage.get_json::<platform_core::ChainState>(&key).await {
@@ -1719,7 +1760,7 @@ async fn load_core_state_from_storage(
 
 /// Persist core ChainState to distributed storage
 async fn persist_core_state_to_storage(
-    storage: &Arc<LocalStorage>,
+    storage: &Arc<TrackedStorage>,
     chain_state: &Arc<RwLock<platform_core::ChainState>>,
 ) -> Result<()> {
     let state = chain_state.read().clone();
@@ -1791,7 +1832,7 @@ async fn handle_network_event(
     validator_set: &Arc<ValidatorSet>,
     state_manager: &Arc<StateManager>,
     wasm_executor_ref: &Option<Arc<WasmChallengeExecutor>>,
-    storage: &Arc<LocalStorage>,
+    storage: &Arc<TrackedStorage>,
     keypair: &Keypair,
     p2p_cmd_tx: &tokio::sync::mpsc::Sender<platform_p2p_consensus::P2PCommand>,
     chain_state: &Arc<RwLock<platform_core::ChainState>>,
@@ -2902,7 +2943,7 @@ async fn handle_network_event(
                                     platform_p2p_consensus::StateMutationType::WasmUpload { challenge_id } => {
                                         let challenge_id_str = challenge_id.to_string();
                                         let wasm_key = StorageKey::new("wasm", &challenge_id_str);
-                                        match storage.put(wasm_key, entry.data.clone(), PutOptions::default()).await {
+                                        match storage.put(wasm_key, entry.data.clone(), put_options_with_block(&state_manager)).await {
                                             Ok(metadata) => {
                                                 let cid = *challenge_id;
                                                 let owner = entry.proposer.clone();
@@ -3134,10 +3175,13 @@ async fn handle_block_event(
     wasm_executor: &Option<Arc<WasmChallengeExecutor>>,
     keypair: &Keypair,
     chain_state: &Arc<RwLock<platform_core::ChainState>>,
+    storage: &Arc<TrackedStorage>,
 ) {
     match event {
         BlockSyncEvent::NewBlock { block_number, .. } => {
             debug!("Block {}", block_number);
+            // Update storage block tracking
+            storage.set_block(block_number);
             // Link state to Bittensor block (block hash not available in event, use zeros)
             state_manager.apply(|state| {
                 state.link_to_bittensor_block(block_number, [0u8; 32]);

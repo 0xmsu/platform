@@ -1,6 +1,6 @@
 use platform_core::{ChallengeId, Keypair};
 use platform_distributed_storage::{
-    DistributedStore, GetOptions as DGetOptions, LocalStorage, PutOptions as DPutOptions,
+    DistributedStore, GetOptions as DGetOptions, PutOptions as DPutOptions,
     StorageKey as DStorageKey,
 };
 use platform_p2p_consensus::{P2PCommand, P2PMessage, StorageProposal, StorageProposalMessage};
@@ -13,14 +13,15 @@ use wasm_runtime_interface::storage::{StorageBackend, StorageHostError};
 pub type LocalProposalSender = mpsc::Sender<StorageProposal>;
 
 pub struct ChallengeStorageBackend {
-    storage: Arc<LocalStorage>,
+    storage: Arc<dyn DistributedStore>,
     p2p_tx: Option<mpsc::Sender<P2PCommand>>,
     local_proposal_tx: Option<LocalProposalSender>,
     keypair: Option<Keypair>,
 }
 
 impl ChallengeStorageBackend {
-    pub fn new(storage: Arc<LocalStorage>) -> Self {
+    #[allow(dead_code)]
+    pub fn new(storage: Arc<dyn DistributedStore>) -> Self {
         Self {
             storage,
             p2p_tx: None,
@@ -30,7 +31,7 @@ impl ChallengeStorageBackend {
     }
 
     pub fn with_p2p(
-        storage: Arc<LocalStorage>,
+        storage: Arc<dyn DistributedStore>,
         p2p_tx: mpsc::Sender<P2PCommand>,
         local_proposal_tx: LocalProposalSender,
         keypair: Keypair,

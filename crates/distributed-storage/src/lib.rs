@@ -95,6 +95,7 @@ pub mod replication;
 pub mod state_consensus;
 pub mod store;
 pub mod submission;
+pub mod tracked;
 pub mod validated_storage;
 pub mod weights;
 
@@ -124,6 +125,9 @@ pub use weights::{StoredWeights, ValidatorWeightVote, WeightAggregator, WeightHi
 // Index and audit systems
 pub use audit::{AuditEntry, AuditLog, AuditOperation};
 pub use index::{AtomicCounter, IndexDefinition, IndexEntry, IndexManager, IndexPage};
+
+// Tracked storage with compression
+pub use tracked::{CompressionMode, TrackedStorage, TrackedStorageConfig, TrackedStorageStats};
 
 // Challenge-specific storage
 pub use challenge_store::{
