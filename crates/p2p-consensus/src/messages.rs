@@ -74,6 +74,10 @@ pub enum P2PMessage {
     CoreStateRequest(CoreStateRequestMessage),
     /// Core state sync response
     CoreStateResponse(CoreStateResponseMessage),
+    /// Challenge sync proposal for periodic consensus
+    ChallengeSyncProposal(ChallengeSyncProposalMessage),
+    /// Vote on a challenge sync proposal
+    ChallengeSyncVote(ChallengeSyncVoteMessage),
 }
 
 impl P2PMessage {
@@ -134,6 +138,8 @@ impl P2PMessage {
             P2PMessage::StateMutationVote(_) => "StateMutationVote",
             P2PMessage::CoreStateRequest(_) => "CoreStateRequest",
             P2PMessage::CoreStateResponse(_) => "CoreStateResponse",
+            P2PMessage::ChallengeSyncProposal(_) => "ChallengeSyncProposal",
+            P2PMessage::ChallengeSyncVote(_) => "ChallengeSyncVote",
         }
     }
 }
@@ -978,6 +984,42 @@ pub struct StorageRootSyncMessage {
     pub epoch: u64,
     /// Storage roots per challenge (challenge_id -> merkle root hash)
     pub roots: Vec<(ChallengeId, [u8; 32])>,
+    /// Timestamp
+    pub timestamp: i64,
+    /// Signature
+    pub signature: Vec<u8>,
+}
+
+/// Challenge sync proposal for periodic consensus-based state sync
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChallengeSyncProposalMessage {
+    /// Challenge being synced
+    pub challenge_id: ChallengeId,
+    /// Hash of the sync result for consensus comparison
+    pub sync_result_hash: [u8; 32],
+    /// Proposer validator
+    pub proposer: Hotkey,
+    /// Block number at which sync was triggered
+    pub block_number: u64,
+    /// Timestamp
+    pub timestamp: i64,
+    /// Signature
+    pub signature: Vec<u8>,
+}
+
+/// Vote on a challenge sync proposal
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChallengeSyncVoteMessage {
+    /// Challenge being synced
+    pub challenge_id: ChallengeId,
+    /// Hash being voted on
+    pub sync_result_hash: [u8; 32],
+    /// Block number
+    pub block_number: u64,
+    /// Voter validator
+    pub voter: Hotkey,
+    /// Whether the voter agrees with the hash
+    pub approve: bool,
     /// Timestamp
     pub timestamp: i64,
     /// Signature

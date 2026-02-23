@@ -912,6 +912,9 @@ async fn main() -> Result<()> {
     let mut stale_job_interval = tokio::time::interval(Duration::from_secs(120));
     let mut weight_check_interval = tokio::time::interval(Duration::from_secs(30));
     let mut last_weight_submission_epoch: u64 = 0; // Local tracking of weight submissions
+    let mut challenge_sync_interval = tokio::time::interval(Duration::from_secs(60)); // Check every minute
+    let mut last_sync_block: u64 = 0; // Last block where sync was triggered
+    let sync_block_interval: u64 = 60; // Sync every 60 blocks
 
     // Clone p2p_cmd_tx for use in the loop
     let p2p_broadcast_tx = p2p_cmd_tx.clone();
@@ -1493,6 +1496,78 @@ async fn main() -> Result<()> {
                         warn!("Failed to create periodic checkpoint: {}", e);
                     } else {
                         debug!("Periodic checkpoint created");
+                    }
+                }
+            }
+
+            // Challenge sync ticker - every 60 blocks, sync all challenges
+            _ = challenge_sync_interval.tick() => {
+                if !is_bootnode {
+                    let current_block = state_manager.apply(|state| state.bittensor_block);
+
+                    // Check if we should sync (every 60 blocks)
+                    if current_block / sync_block_interval > last_sync_block / sync_block_interval {
+                        last_sync_block = current_block;
+
+                        // Get all active challenges
+                        let challenges: Vec<_> = {
+                            let cs = chain_state.read();
+                            cs.wasm_challenge_configs
+                                .iter()
+                                .filter(|(_, cfg)| cfg.is_active)
+                                .map(|(id, _)| *id)
+                                .collect()
+                        };
+
+                        for challenge_id in challenges {
+                            let challenge_id_str = challenge_id.to_string();
+                            let module_path = format!("{}.wasm", challenge_id_str);
+
+                            if let Some(ref executor) = wasm_executor {
+                                match executor.execute_sync(&module_path) {
+                                    Ok(sync_result) => {
+                                        info!(
+                                            challenge_id = %challenge_id,
+                                            block = current_block,
+                                            total_users = sync_result.total_users,
+                                            "Challenge sync completed, broadcasting proposal"
+                                        );
+
+                                        // Broadcast sync proposal
+                                        let timestamp = chrono::Utc::now().timestamp_millis();
+                                        let proposal_data = bincode::serialize(&(
+                                            &challenge_id,
+                                            &sync_result.leaderboard_hash,
+                                            current_block,
+                                            timestamp
+                                        )).unwrap_or_default();
+                                        let signature = keypair.sign_bytes(&proposal_data).unwrap_or_default();
+
+                                        let proposal_msg = P2PMessage::ChallengeSyncProposal(
+                                            platform_p2p_consensus::ChallengeSyncProposalMessage {
+                                                challenge_id,
+                                                sync_result_hash: sync_result.leaderboard_hash,
+                                                proposer: keypair.hotkey(),
+                                                block_number: current_block,
+                                                timestamp,
+                                                signature,
+                                            }
+                                        );
+
+                                        if let Err(e) = p2p_broadcast_tx.send(platform_p2p_consensus::P2PCommand::Broadcast(proposal_msg)).await {
+                                            warn!(error = %e, "Failed to broadcast sync proposal");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug!(
+                                            challenge_id = %challenge_id,
+                                            error = %e,
+                                            "Failed to execute sync (WASM may not support sync)"
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3001,6 +3076,21 @@ async fn handle_network_event(
                         }
                     }
                 }
+            }
+            P2PMessage::ChallengeSyncProposal(proposal) => {
+                info!(
+                    challenge_id = %proposal.challenge_id,
+                    block = proposal.block_number,
+                    proposer = %proposal.proposer.to_ss58(),
+                    "Received challenge sync proposal (consensus voting not yet implemented)"
+                );
+            }
+            P2PMessage::ChallengeSyncVote(vote) => {
+                debug!(
+                    challenge_id = %vote.challenge_id,
+                    voter = %vote.voter.to_ss58(),
+                    "Received challenge sync vote (consensus voting not yet implemented)"
+                );
             }
         },
         NetworkEvent::PeerConnected(peer_id) => {

@@ -13,7 +13,9 @@ pub use types::{
 };
 pub use types::{ContainerRunRequest, ContainerRunResponse};
 pub use types::{EvaluationInput, EvaluationOutput};
-pub use types::{WasmRouteDefinition, WasmRouteRequest, WasmRouteResponse, WeightEntry};
+pub use types::{
+    WasmRouteDefinition, WasmRouteRequest, WasmRouteResponse, WasmSyncResult, WeightEntry,
+};
 
 pub trait Challenge {
     fn name(&self) -> &'static str;
@@ -61,6 +63,13 @@ pub trait Challenge {
     /// permitted. The default implementation allows all writes.
     fn validate_storage_write(&self, _key: &[u8], _value: &[u8]) -> bool {
         true
+    }
+
+    /// Perform a periodic sync operation and return serialized sync result.
+    /// Called by validators at regular intervals for consensus-based state sync.
+    /// The default implementation returns an empty vector.
+    fn sync(&self) -> alloc::vec::Vec<u8> {
+        alloc::vec::Vec::new()
     }
 }
 
@@ -310,6 +319,22 @@ macro_rules! register_challenge {
             } else {
                 0
             }
+        }
+
+        #[no_mangle]
+        pub extern "C" fn sync() -> i64 {
+            let output = <$ty as $crate::Challenge>::sync(&_CHALLENGE);
+            if output.is_empty() {
+                return $crate::pack_ptr_len(0, 0);
+            }
+            let ptr = $crate::alloc_impl::sdk_alloc(output.len());
+            if ptr.is_null() {
+                return $crate::pack_ptr_len(0, 0);
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(output.as_ptr(), ptr, output.len());
+            }
+            $crate::pack_ptr_len(ptr as i32, output.len() as i32)
         }
     };
 }

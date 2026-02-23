@@ -985,6 +985,72 @@ impl WasmChallengeExecutor {
         Ok(weights)
     }
 
+    /// Execute sync on a WASM challenge module.
+    /// Returns WasmSyncResult with leaderboard hash and stats for consensus.
+    pub fn execute_sync(
+        &self,
+        module_path: &str,
+    ) -> Result<platform_challenge_sdk_wasm::WasmSyncResult> {
+        let start = Instant::now();
+
+        let module = self
+            .load_module(module_path)
+            .context("Failed to load WASM module")?;
+
+        let instance_config = InstanceConfig {
+            challenge_id: module_path.to_string(),
+            validator_id: "validator".to_string(),
+            storage_host_config: StorageHostConfig {
+                allow_direct_writes: true,
+                require_consensus: false,
+                ..self.config.storage_host_config.clone()
+            },
+            storage_backend: Arc::clone(&self.config.storage_backend),
+            consensus_policy: ConsensusPolicy::read_only(),
+            ..Default::default()
+        };
+
+        let mut instance = self
+            .runtime
+            .instantiate(&module, instance_config, None)
+            .map_err(|e| anyhow::anyhow!("WASM instantiation failed: {}", e))?;
+
+        let result = instance
+            .call_return_i64("sync")
+            .map_err(|e| anyhow::anyhow!("WASM sync call failed: {}", e))?;
+
+        let out_len = (result >> 32) as i32;
+        let out_ptr = (result & 0xFFFF_FFFF) as i32;
+
+        if out_ptr <= 0 || out_len <= 0 {
+            return Ok(platform_challenge_sdk_wasm::WasmSyncResult {
+                leaderboard_hash: [0u8; 32],
+                total_users: 0,
+                total_valid_issues: 0,
+                total_invalid_issues: 0,
+                total_pending_issues: 0,
+                sync_timestamp: 0,
+            });
+        }
+
+        let result_data = instance
+            .read_memory(out_ptr as usize, out_len as usize)
+            .map_err(|e| anyhow::anyhow!("failed to read WASM memory for sync output: {}", e))?;
+
+        let sync_result: platform_challenge_sdk_wasm::WasmSyncResult =
+            bincode::deserialize(&result_data)
+                .context("Failed to deserialize sync output as WasmSyncResult")?;
+
+        info!(
+            module = module_path,
+            total_users = sync_result.total_users,
+            execution_time_ms = start.elapsed().as_millis() as u64,
+            "WASM sync completed"
+        );
+
+        Ok(sync_result)
+    }
+
     #[allow(dead_code)]
     pub fn execute_validate_storage_write(
         &self,

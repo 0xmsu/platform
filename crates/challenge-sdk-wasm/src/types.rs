@@ -199,3 +199,16 @@ pub struct WeightEntry {
     pub uid: u16,
     pub weight: u16,
 }
+
+/// Result of a sync operation for consensus.
+///
+/// Returned by [`Challenge::sync`] for validators to reach consensus on state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WasmSyncResult {
+    pub leaderboard_hash: [u8; 32],
+    pub total_users: u32,
+    pub total_valid_issues: u32,
+    pub total_invalid_issues: u32,
+    pub total_pending_issues: u32,
+    pub sync_timestamp: i64,
+}
