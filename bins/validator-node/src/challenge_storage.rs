@@ -19,9 +19,11 @@ impl ChallengeStorageBackend {
 impl StorageBackend for ChallengeStorageBackend {
     fn get(&self, challenge_id: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StorageHostError> {
         let storage_key = DStorageKey::new(challenge_id, hex::encode(key));
-        let result = tokio::runtime::Handle::current()
-            .block_on(self.storage.get(&storage_key, DGetOptions::default()))
-            .map_err(|e| StorageHostError::StorageError(e.to_string()))?;
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.storage.get(&storage_key, DGetOptions::default()))
+        })
+        .map_err(|e| StorageHostError::StorageError(e.to_string()))?;
         Ok(result.map(|v| v.data))
     }
 
@@ -32,12 +34,14 @@ impl StorageBackend for ChallengeStorageBackend {
         value: &[u8],
     ) -> Result<[u8; 32], StorageHostError> {
         let storage_key = DStorageKey::new(challenge_id, hex::encode(key));
-        tokio::runtime::Handle::current()
-            .block_on(
-                self.storage
-                    .put(storage_key, value.to_vec(), DPutOptions::default()),
-            )
-            .map_err(|e| StorageHostError::StorageError(e.to_string()))?;
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.storage.put(
+                storage_key,
+                value.to_vec(),
+                DPutOptions::default(),
+            ))
+        })
+        .map_err(|e| StorageHostError::StorageError(e.to_string()))?;
 
         let mut hasher = Sha256::new();
         hasher.update(challenge_id.as_bytes());
@@ -48,9 +52,10 @@ impl StorageBackend for ChallengeStorageBackend {
 
     fn delete(&self, challenge_id: &str, key: &[u8]) -> Result<bool, StorageHostError> {
         let storage_key = DStorageKey::new(challenge_id, hex::encode(key));
-        tokio::runtime::Handle::current()
-            .block_on(self.storage.delete(&storage_key))
-            .map_err(|e| StorageHostError::StorageError(e.to_string()))
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.storage.delete(&storage_key))
+        })
+        .map_err(|e| StorageHostError::StorageError(e.to_string()))
     }
 
     fn get_cross(
@@ -58,6 +63,12 @@ impl StorageBackend for ChallengeStorageBackend {
         challenge_id: &str,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, StorageHostError> {
-        self.get(challenge_id, key)
+        let storage_key = DStorageKey::new(challenge_id, hex::encode(key));
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.storage.get(&storage_key, DGetOptions::default()))
+        })
+        .map_err(|e| StorageHostError::StorageError(e.to_string()))?;
+        Ok(result.map(|v| v.data))
     }
 }

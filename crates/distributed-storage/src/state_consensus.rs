@@ -621,6 +621,11 @@ impl StateRootConsensus {
         })?;
 
         // Verify voter is a known validator
+        if self.valid_voters.is_empty() {
+            tracing::error!(
+                "valid_voters is empty - voter authentication disabled! Call set_valid_voters()"
+            );
+        }
         if !self.valid_voters.is_empty() && !self.valid_voters.contains(&vote.voter) {
             return Err(StateRootConsensusError::InternalError(format!(
                 "Vote from unknown validator: {}",
@@ -628,8 +633,16 @@ impl StateRootConsensus {
             )));
         }
 
-        // Verify vote signature if present
-        if !vote.signature.is_empty() {
+        // Reject votes without signatures
+        if vote.signature.is_empty() {
+            return Err(StateRootConsensusError::InternalError(format!(
+                "Vote from {} has no signature",
+                vote.voter.to_hex()
+            )));
+        }
+
+        // Verify vote signature cryptographically when valid_voters is configured
+        if !self.valid_voters.is_empty() {
             let vote_hash = vote.compute_hash();
             let signed_msg = platform_core::SignedMessage {
                 message: vote_hash.to_vec(),
@@ -652,11 +665,6 @@ impl StateRootConsensus {
                     )));
                 }
             }
-        } else {
-            warn!(
-                voter = vote.voter.to_hex(),
-                "Vote received without signature"
-            );
         }
 
         // Verify vote is for current proposal
@@ -1292,7 +1300,7 @@ mod tests {
         assert!(consensus.check_consensus().is_none()); // Not enough yet
 
         // Second vote from another validator
-        let vote2 = StateRootVote {
+        let mut vote2 = StateRootVote {
             block_number: 100,
             voter: create_test_hotkey(2),
             state_root: global_root,
@@ -1300,6 +1308,7 @@ mod tests {
             timestamp: chrono::Utc::now().timestamp_millis(),
             signature: Vec::new(),
         };
+        vote2.signature = vec![0u8; 64];
 
         let result = consensus.receive_vote(vote2).expect("Should accept vote");
         assert!(result.is_some()); // Should have consensus now
@@ -1322,7 +1331,7 @@ mod tests {
         let _proposal = consensus.propose_state_root(100, global_root, challenge_roots);
 
         // First vote from validator 2
-        let vote1 = StateRootVote {
+        let mut vote1 = StateRootVote {
             block_number: 100,
             voter: create_test_hotkey(2),
             state_root: global_root,
@@ -1330,10 +1339,11 @@ mod tests {
             timestamp: chrono::Utc::now().timestamp_millis(),
             signature: Vec::new(),
         };
+        vote1.signature = vec![0u8; 64];
         consensus.receive_vote(vote1).expect("Should accept vote");
 
         // Conflicting vote from same validator
-        let vote2 = StateRootVote {
+        let mut vote2 = StateRootVote {
             block_number: 100,
             voter: create_test_hotkey(2),
             state_root: [99u8; 32], // Different root!
@@ -1341,6 +1351,7 @@ mod tests {
             timestamp: chrono::Utc::now().timestamp_millis(),
             signature: Vec::new(),
         };
+        vote2.signature = vec![0u8; 64];
 
         let result = consensus.receive_vote(vote2);
         assert!(result.is_err());
@@ -1507,7 +1518,7 @@ mod tests {
         let hotkey = create_test_hotkey(1);
         let mut consensus = StateRootConsensus::new(hotkey, 3);
 
-        let vote = StateRootVote {
+        let mut vote = StateRootVote {
             block_number: 100,
             voter: create_test_hotkey(2),
             state_root: [42u8; 32],
@@ -1515,6 +1526,7 @@ mod tests {
             timestamp: chrono::Utc::now().timestamp_millis(),
             signature: Vec::new(),
         };
+        vote.signature = vec![0u8; 64];
 
         let result = consensus.receive_vote(vote);
         assert!(result.is_err());
@@ -1535,7 +1547,7 @@ mod tests {
 
         let _proposal = consensus.propose_state_root(100, global_root, challenge_roots);
 
-        let vote = StateRootVote {
+        let mut vote = StateRootVote {
             block_number: 999, // Wrong block!
             voter: create_test_hotkey(2),
             state_root: global_root,
@@ -1543,6 +1555,7 @@ mod tests {
             timestamp: chrono::Utc::now().timestamp_millis(),
             signature: Vec::new(),
         };
+        vote.signature = vec![0u8; 64];
 
         let result = consensus.receive_vote(vote);
         assert!(result.is_err());

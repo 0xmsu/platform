@@ -1191,7 +1191,11 @@ impl RpcHandler {
 
         // Verify authentication using the ORIGINAL challenge_id (not resolved UUID)
         // because the CLI signs with the name it knows (e.g. "bounty-challenge")
-        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+        let body_bytes = if body.is_null() {
+            Vec::new()
+        } else {
+            serde_json::to_vec(&body).unwrap_or_default()
+        };
         let auth_hotkey =
             crate::auth::verify_route_auth(&headers, &challenge_id, &method, &path, &body_bytes)
                 .ok();
@@ -1200,7 +1204,42 @@ impl RpcHandler {
         let challenge_id = resolved_id;
 
         // Extract path params by matching against registered route definitions
-        let path_params = std::collections::HashMap::new();
+        let path_params = {
+            let chain = self.chain_state.read();
+            let challenge_uuid = uuid::Uuid::parse_str(&challenge_id)
+                .ok()
+                .map(platform_core::ChallengeId);
+
+            challenge_uuid
+                .as_ref()
+                .and_then(|cid| chain.challenge_routes.get(cid))
+                .and_then(|chain_routes| {
+                    use platform_challenge_sdk::HttpMethod;
+                    for r in chain_routes {
+                        let http_method = match r.method.to_uppercase().as_str() {
+                            "GET" => HttpMethod::Get,
+                            "POST" => HttpMethod::Post,
+                            "PUT" => HttpMethod::Put,
+                            "DELETE" => HttpMethod::Delete,
+                            "PATCH" => HttpMethod::Patch,
+                            _ => HttpMethod::Get,
+                        };
+                        let mut route = platform_challenge_sdk::ChallengeRoute::new(
+                            http_method,
+                            r.path.clone(),
+                            r.description.clone(),
+                        );
+                        if r.requires_auth {
+                            route = route.with_auth();
+                        }
+                        if let Some(p) = route.matches(&method, &path) {
+                            return Some(p);
+                        }
+                    }
+                    None
+                })
+                .unwrap_or_default()
+        };
 
         let request = RouteRequest {
             method,

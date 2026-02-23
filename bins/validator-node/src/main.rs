@@ -2076,11 +2076,25 @@ async fn handle_network_event(
                 );
             }
             P2PMessage::AgentLogProposal(msg) => {
-                debug!(
-                    submission_id = %msg.submission_id,
-                    validator = %msg.validator_hotkey.to_hex(),
-                    "Received agent log proposal"
-                );
+                // Verify logs hash matches data
+                let computed_hash = platform_core::crypto::hash(&msg.logs_data);
+                if computed_hash != msg.logs_hash {
+                    warn!("Agent log proposal hash mismatch, ignoring");
+                } else {
+                    debug!(
+                        submission_id = %msg.submission_id,
+                        validator = %msg.validator_hotkey.to_hex(),
+                        "Received valid agent log proposal"
+                    );
+                    // Store in chain state for consensus
+                    state_manager.apply(|state| {
+                        state
+                            .agent_log_proposals
+                            .entry(msg.submission_id.clone())
+                            .or_default()
+                            .insert(msg.validator_hotkey.clone(), msg.logs_data.clone());
+                    });
+                }
             }
             P2PMessage::StorageRootSync(msg) => {
                 if !validator_set.is_validator(&msg.validator) {
@@ -2276,6 +2290,7 @@ async fn handle_block_event(
 
             // Get weights from decentralized state
             if let (Some(st), Some(sig)) = (subtensor.as_ref(), signer.as_ref()) {
+                // TODO: Call detect_suspicious_validators and apply_penalties with excluded validators
                 let final_weights = state_manager.apply(|state| state.finalize_weights());
 
                 match final_weights {
@@ -2285,11 +2300,16 @@ async fn handle_block_event(
                         let vals: Vec<u16> = weights.iter().map(|(_, w)| *w).collect();
 
                         info!("Submitting weights for {} UIDs", uids.len());
+                        // TODO(H6): mechanism_id is hardcoded to 0. Should be derived from
+                        // challenge config (e.g. mechanism_configs) or subnet hyperparameters.
+                        // Each subnet mechanism may have a different ID; using 0 assumes a
+                        // single-mechanism subnet.
+                        let mechanism_id = 0u8;
                         match st
                             .set_mechanism_weights(
                                 sig,
                                 netuid,
-                                0,
+                                mechanism_id,
                                 &uids,
                                 &vals,
                                 version_key,
@@ -2306,11 +2326,13 @@ async fn handle_block_event(
                     }
                     _ => {
                         info!("No challenge weights for epoch {} - submitting burn weights (100% to UID 0)", epoch);
+                        // TODO(H6): mechanism_id is hardcoded to 0 (see note above)
+                        let mechanism_id = 0u8;
                         match st
                             .set_mechanism_weights(
                                 sig,
                                 netuid,
-                                0,
+                                mechanism_id,
                                 &[0u16],
                                 &[65535u16],
                                 version_key,

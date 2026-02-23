@@ -790,6 +790,10 @@ impl DistributedStorage {
             .insert(&key, value)
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
+        self.data_tree
+            .flush()
+            .map_err(|e| StorageError::Database(format!("flush failed: {}", e)))?;
+
         self.update_indexes(&entry.header)?;
         self.cache.write().insert(key, (entry, Instant::now()));
 
@@ -1054,6 +1058,7 @@ impl DistributedStorage {
                     self.data_tree
                         .remove(&key)
                         .map_err(|e| StorageError::Database(e.to_string()))?;
+                    // TODO: Clean up orphaned index entries for expired data
                     expired_keys.push(key.to_vec());
                     removed += 1;
                 }
@@ -1077,9 +1082,16 @@ impl DistributedStorage {
 
         // Cleanup old pending ops
         let pending_timeout = 100; // blocks
-        self.pending_ops
-            .write()
-            .retain(|_, op| current_block - op.proposed_block < pending_timeout);
+        let mut pending = self.pending_ops.write();
+        let expired_op_ids: Vec<[u8; 32]> = pending
+            .iter()
+            .filter(|(_, op)| current_block.saturating_sub(op.proposed_block) >= pending_timeout)
+            .map(|(id, _)| *id)
+            .collect();
+        for op_id in &expired_op_ids {
+            pending.remove(op_id);
+            let _ = self.pending_ops_tree.remove(op_id);
+        }
 
         Ok(removed)
     }

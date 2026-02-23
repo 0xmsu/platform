@@ -39,6 +39,7 @@ impl CommitRevealState {
         }
     }
 
+    // TODO: Add phase validation - enforce commit phase timing before allowing commitments
     /// Submit a commitment
     pub fn submit_commitment(
         &mut self,
@@ -69,6 +70,7 @@ impl CommitRevealState {
         Ok(())
     }
 
+    // TODO: Add phase validation - enforce reveal phase timing, reject if still in commit phase
     /// Submit a reveal
     pub fn submit_reveal(&mut self, reveal: WeightReveal) -> Result<(), CommitRevealError> {
         if reveal.epoch != self.epoch {
@@ -152,13 +154,18 @@ impl CommitRevealState {
 
         if divergence_detected {
             error!(
-                "Epoch {}: Weight submissions diverged across {} validators! Using first submission.",
+                "Epoch {}: Weight submissions diverged across {} validators! Using majority vote.",
                 self.epoch,
                 submissions.len()
             );
         }
 
-        let aggregated = weights::normalize_weights(first.clone());
+        // Use majority vote instead of silently picking first submission
+        let aggregated = if divergence_detected {
+            weights::normalize_weights(self.majority_weights(&submissions))
+        } else {
+            weights::normalize_weights(first.clone())
+        };
 
         let participating: Vec<Hotkey> = self.reveals.keys().cloned().collect();
         let mut excluded = self.missing_reveals.clone();
@@ -201,6 +208,25 @@ impl CommitRevealState {
     /// Check if validator has revealed
     pub fn has_revealed(&self, validator: &Hotkey) -> bool {
         self.reveals.contains_key(validator)
+    }
+
+    /// Compute majority weights from divergent submissions by averaging weights per hotkey
+    fn majority_weights(&self, submissions: &[Vec<WeightAssignment>]) -> Vec<WeightAssignment> {
+        let mut weight_sums: HashMap<String, (f64, usize)> = HashMap::new();
+        for submission in submissions {
+            for wa in submission {
+                let entry = weight_sums.entry(wa.hotkey.clone()).or_insert((0.0, 0));
+                entry.0 += wa.weight;
+                entry.1 += 1;
+            }
+        }
+        weight_sums
+            .into_iter()
+            .map(|(hotkey, (sum, count))| WeightAssignment {
+                hotkey,
+                weight: sum / count as f64,
+            })
+            .collect()
     }
 
     /// Check if submissions from different validators have diverged.

@@ -498,7 +498,7 @@ impl ChainState {
             }
 
             let approve_count = proposal.votes.values().filter(|&&v| v).count();
-            let threshold = (total_validators / 2) + 1;
+            let threshold = (2 * total_validators / 3) + 1;
 
             if approve_count >= threshold {
                 proposal.finalized = true;

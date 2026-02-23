@@ -494,6 +494,9 @@ impl<S: DistributedStore + 'static> ValidatedStorage<S> {
         // Verify voter is a known validator
         {
             let voters = self.valid_voters.read().await;
+            if voters.is_empty() {
+                tracing::error!("valid_voters is empty - voter authentication disabled! Call set_valid_voters()");
+            }
             if !voters.is_empty() && !voters.contains(&vote.voter) {
                 return Err(ValidatedStorageError::Storage(format!(
                     "Vote from unknown validator: {}",
@@ -502,25 +505,34 @@ impl<S: DistributedStore + 'static> ValidatedStorage<S> {
             }
         }
 
-        // Verify vote signature if present
-        if !vote.signature.is_empty() {
-            let vote_hash = vote.compute_hash();
-            let signed_msg = platform_core::SignedMessage {
-                message: vote_hash.to_vec(),
-                signature: vote.signature.clone(),
-                signer: vote.voter.clone(),
-            };
-            match signed_msg.verify() {
-                Ok(true) => {}
-                _ => {
-                    return Err(ValidatedStorageError::Storage(format!(
-                        "Invalid signature from voter: {}",
-                        vote.voter.to_hex()
-                    )));
+        // Reject votes without signatures
+        if vote.signature.is_empty() {
+            return Err(ValidatedStorageError::Storage(format!(
+                "Vote from {} has no signature",
+                vote.voter.to_hex()
+            )));
+        }
+
+        // Verify vote signature cryptographically when valid_voters is configured
+        {
+            let voters = self.valid_voters.read().await;
+            if !voters.is_empty() {
+                let vote_hash = vote.compute_hash();
+                let signed_msg = platform_core::SignedMessage {
+                    message: vote_hash.to_vec(),
+                    signature: vote.signature.clone(),
+                    signer: vote.voter.clone(),
+                };
+                match signed_msg.verify() {
+                    Ok(true) => {}
+                    _ => {
+                        return Err(ValidatedStorageError::Storage(format!(
+                            "Invalid signature from voter: {}",
+                            vote.voter.to_hex()
+                        )));
+                    }
                 }
             }
-        } else {
-            tracing::warn!(voter = %vote.voter.to_hex(), "Vote received without signature");
         }
 
         let proposal_id = vote.proposal_id;
@@ -886,7 +898,9 @@ mod tests {
             .expect("Check should succeed");
         assert!(result.is_none());
 
-        let vote2 = StorageWriteVote::new(proposal.proposal_id, create_test_hotkey(2), true, None);
+        let mut vote2 =
+            StorageWriteVote::new(proposal.proposal_id, create_test_hotkey(2), true, None);
+        vote2.signature = vec![0u8; 64];
         let result = validated
             .receive_vote(vote2)
             .await
@@ -916,7 +930,9 @@ mod tests {
             .await
             .expect("Vote should succeed");
 
-        let vote2 = StorageWriteVote::new(proposal.proposal_id, create_test_hotkey(2), true, None);
+        let mut vote2 =
+            StorageWriteVote::new(proposal.proposal_id, create_test_hotkey(2), true, None);
+        vote2.signature = vec![0u8; 64];
         validated
             .receive_vote(vote2)
             .await
@@ -1031,13 +1047,15 @@ mod tests {
         let proposal = validated.propose_write(b"test-key", b"test-value").await;
 
         let voter = create_test_hotkey(2);
-        let vote1 = StorageWriteVote::new(proposal.proposal_id, voter.clone(), true, None);
+        let mut vote1 = StorageWriteVote::new(proposal.proposal_id, voter.clone(), true, None);
+        vote1.signature = vec![0u8; 64];
         validated
             .receive_vote(vote1)
             .await
             .expect("First vote should succeed");
 
-        let vote2 = StorageWriteVote::new(proposal.proposal_id, voter, false, None);
+        let mut vote2 = StorageWriteVote::new(proposal.proposal_id, voter, false, None);
+        vote2.signature = vec![0u8; 64];
         let result = validated.receive_vote(vote2).await;
 
         assert!(matches!(

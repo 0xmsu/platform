@@ -1103,6 +1103,7 @@ impl P2PNetwork {
         }
     }
 
+    // TODO: Route challenge-specific messages to challenge_topic
     /// Broadcast a message (internal helper for command handling)
     fn do_broadcast(
         &self,

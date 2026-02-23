@@ -1067,6 +1067,19 @@ impl ConsensusEngine {
             });
         }
 
+        // Deduplicate view change voters
+        let unique_voters: std::collections::HashSet<&Hotkey> = new_view
+            .view_changes
+            .iter()
+            .map(|vc| &vc.validator)
+            .collect();
+        if unique_voters.len() < quorum {
+            return Err(ConsensusError::NotEnoughVotes {
+                needed: quorum,
+                have: unique_voters.len(),
+            });
+        }
+
         let view_change_voters: Vec<Hotkey> = new_view
             .view_changes
             .iter()
@@ -1133,6 +1146,65 @@ impl ConsensusEngine {
             .max_by_key(|(seq, _)| *seq);
 
         if let Some((sequence, proof)) = highest_prepared {
+            // Verify prepared proof signatures before restoring
+            // Verify PrePrepare signature
+            {
+                #[derive(Serialize)]
+                struct PrePrepareSigningData {
+                    view: ViewNumber,
+                    sequence: SequenceNumber,
+                    proposal_hash: [u8; 32],
+                }
+
+                let signing_data = PrePrepareSigningData {
+                    view: proof.pre_prepare.view,
+                    sequence: proof.pre_prepare.sequence,
+                    proposal_hash: proof.pre_prepare.proposal_hash,
+                };
+
+                let signing_bytes = bincode::serialize(&signing_data).unwrap_or_default();
+                let is_valid = self
+                    .validator_set
+                    .verify_signature(
+                        &proof.pre_prepare.leader,
+                        &signing_bytes,
+                        &proof.pre_prepare.signature,
+                    )
+                    .unwrap_or(false);
+                if !is_valid {
+                    warn!(leader = %proof.pre_prepare.leader.to_hex(), "Invalid PrePrepare signature in view change proof, skipping restore");
+                    *self.current_round.write() = None;
+                    return Ok(());
+                }
+            }
+
+            // Verify Prepare signatures
+            for prepare in &proof.prepares {
+                #[derive(Serialize)]
+                struct PrepareSigningData {
+                    view: ViewNumber,
+                    sequence: SequenceNumber,
+                    proposal_hash: [u8; 32],
+                }
+
+                let signing_data = PrepareSigningData {
+                    view: prepare.view,
+                    sequence: prepare.sequence,
+                    proposal_hash: prepare.proposal_hash,
+                };
+
+                let signing_bytes = bincode::serialize(&signing_data).unwrap_or_default();
+                let is_valid = self
+                    .validator_set
+                    .verify_signature(&prepare.validator, &signing_bytes, &prepare.signature)
+                    .unwrap_or(false);
+                if !is_valid {
+                    warn!(validator = %prepare.validator.to_hex(), "Invalid prepare signature in view change proof, skipping restore");
+                    *self.current_round.write() = None;
+                    return Ok(());
+                }
+            }
+
             info!(
                 view = new_view.view,
                 sequence, "Restoring prepared round from view change proof"

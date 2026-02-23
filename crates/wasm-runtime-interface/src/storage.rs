@@ -596,6 +596,11 @@ fn handle_storage_set(
         return StorageHostStatus::from(err).to_i32();
     }
 
+    if storage.config.require_consensus && !storage.config.allow_direct_writes {
+        warn!("storage_set: consensus required but direct writes disabled");
+        return StorageHostStatus::ConsensusRequired.to_i32();
+    }
+
     let challenge_id = storage.challenge_id.clone();
     let backend = Arc::clone(&storage.backend);
 
@@ -736,6 +741,16 @@ fn handle_storage_get_cross(
     if let Err(err) = storage.config.validate_key(&key) {
         warn!(error = %err, "storage_get_cross: key validation failed");
         return StorageHostStatus::from(err).to_i32();
+    }
+
+    // Block cross-challenge reads unless explicitly allowed
+    if challenge_id != storage.challenge_id {
+        warn!(
+            source = %storage.challenge_id,
+            target = %challenge_id,
+            "Cross-challenge storage read blocked"
+        );
+        return StorageHostStatus::PermissionDenied.to_i32();
     }
 
     let backend = Arc::clone(&storage.backend);

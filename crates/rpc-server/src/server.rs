@@ -129,6 +129,7 @@ impl RpcServer {
     }
 
     /// Build the router
+    // TODO: Add rate limiting middleware (e.g., tower::limit::RateLimitLayer)
     pub fn router(&self) -> Router {
         let rpc_handler = self.rpc_handler.clone();
 
@@ -412,6 +413,17 @@ async fn challenge_route_handler(
         crate::auth::verify_route_auth(&headers_map, &challenge_id, &method, &path, &body_bytes)
             .ok();
 
+    // Enforce auth on routes that require it
+    if route.requires_auth && auth_hotkey.is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "authentication_required",
+                "message": "This route requires authentication"
+            })),
+        );
+    }
+
     let request = RouteRequest {
         method,
         path,
@@ -516,6 +528,20 @@ async fn handle_single_request(
 /// Broadcasts TaskProgressMessage via P2P to other validators.
 async fn webhook_progress_handler(handler: Arc<RpcHandler>, body: Value) -> impl IntoResponse {
     use platform_core::{Keypair, NetworkMessage, SignedNetworkMessage, TaskProgressMessage};
+
+    // Verify webhook caller is authenticated via validator signature
+    // The webhook is only called by local challenge runtimes, so we verify
+    // the caller has a valid validator identity
+    let validator_hotkey = body.get("validator_hotkey").and_then(|v| v.as_str());
+    if validator_hotkey.is_none() || validator_hotkey.unwrap().is_empty() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "missing_authentication",
+                "message": "Webhook requires a valid validator_hotkey"
+            })),
+        );
+    }
 
     // Parse the progress data
     let msg_type = body.get("type").and_then(|v| v.as_str()).unwrap_or("");
