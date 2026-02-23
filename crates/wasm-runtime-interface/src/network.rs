@@ -156,11 +156,39 @@ impl HostFunctionRegistrar for NetworkHostFunctions {
     }
 }
 
+/// Wrapper that drops the inner value in a dedicated OS thread.
+/// Both `reqwest::blocking::Client` and `trust_dns_resolver::Resolver`
+/// own an internal tokio runtime. Dropping them inside an async context
+/// panics with "Cannot drop a runtime in a context where blocking is not
+/// allowed". This wrapper moves the drop to a short-lived thread.
+struct OffThreadDrop<T: Send + 'static>(Option<T>);
+
+impl<T: Send + 'static> OffThreadDrop<T> {
+    fn new(val: T) -> Self {
+        Self(Some(val))
+    }
+}
+
+impl<T: Send + 'static> std::ops::Deref for OffThreadDrop<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.0.as_ref().unwrap()
+    }
+}
+
+impl<T: Send + 'static> Drop for OffThreadDrop<T> {
+    fn drop(&mut self) {
+        if let Some(val) = self.0.take() {
+            std::thread::spawn(move || drop(val));
+        }
+    }
+}
+
 pub struct NetworkState {
     policy: ValidatedNetworkPolicy,
     audit_logger: Option<Arc<dyn NetworkAuditLogger>>,
-    http_client: Client,
-    dns_resolver: Arc<Resolver>,
+    http_client: OffThreadDrop<Client>,
+    dns_resolver: Arc<OffThreadDrop<Resolver>>,
     dns_cache: HashMap<DnsCacheKey, DnsCacheEntry>,
     requests_made: u32,
     dns_lookups: u32,
@@ -215,7 +243,10 @@ impl NetworkState {
             let resolver = Resolver::new(ResolverConfig::default(), resolver_opts)
                 .map_err(|err| NetworkStateError::DnsResolver(err.to_string()))?;
 
-            Ok::<_, NetworkStateError>((client, Arc::new(resolver)))
+            Ok::<_, NetworkStateError>((
+                OffThreadDrop::new(client),
+                Arc::new(OffThreadDrop::new(resolver)),
+            ))
         })
         .join()
         .map_err(|_| {
