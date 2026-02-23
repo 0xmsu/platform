@@ -497,13 +497,15 @@ impl ChainState {
     }
 
     /// Add a vote to a storage proposal
+    /// Consensus requires 35% of total stake to approve/reject
     pub fn vote_storage_proposal(
         &mut self,
         proposal_id: &[u8; 32],
         voter: Hotkey,
         approve: bool,
     ) -> Option<bool> {
-        let total_validators = self.validators.len();
+        // Calculate total stake
+        let total_stake: u64 = self.validators.values().sum();
 
         if let Some(proposal) = self.pending_storage_proposals.get_mut(proposal_id) {
             if proposal.finalized {
@@ -511,22 +513,35 @@ impl ChainState {
             }
             proposal.votes.insert(voter, approve);
 
-            // Check if we have consensus (majority of validators)
-            if total_validators == 0 {
+            if total_stake == 0 {
                 return Some(false);
             }
 
-            let approve_count = proposal.votes.values().filter(|&&v| v).count();
-            let threshold = (2 * total_validators / 3) + 1;
+            // Calculate approve stake (35% threshold)
+            let approve_stake: u64 = proposal
+                .votes
+                .iter()
+                .filter(|(_, &v)| v)
+                .filter_map(|(hotkey, _)| self.validators.get(hotkey))
+                .sum();
 
-            if approve_count >= threshold {
+            let threshold = total_stake * 35 / 100;
+
+            if approve_stake >= threshold {
                 proposal.finalized = true;
                 self.increment_sequence();
                 return Some(true); // Consensus reached, approved
             }
 
-            let reject_count = proposal.votes.values().filter(|&&v| !v).count();
-            if reject_count >= threshold {
+            // Calculate reject stake
+            let reject_stake: u64 = proposal
+                .votes
+                .iter()
+                .filter(|(_, &v)| !v)
+                .filter_map(|(hotkey, _)| self.validators.get(hotkey))
+                .sum();
+
+            if reject_stake >= threshold {
                 proposal.finalized = true;
                 self.increment_sequence();
                 return Some(false); // Consensus reached, rejected

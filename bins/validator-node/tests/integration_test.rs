@@ -88,12 +88,13 @@ fn test_storage_proposal_consensus_flow() {
     assert!(fetched.is_some());
     assert!(!fetched.unwrap().finalized);
 
-    // Vote on proposal — threshold is (2*n/3)+1 = 3 for n=3 validators
-    state.vote_storage_proposal(&proposal_id, proposer.hotkey(), true);
-    state.vote_storage_proposal(&proposal_id, voter1.hotkey(), true);
-    let result = state.vote_storage_proposal(&proposal_id, voter2.hotkey(), true);
-    // The third vote triggers consensus (returns Some(true))
-    assert_eq!(result, Some(true));
+    // Vote on proposal — threshold is 35% of stake (1050 out of 3000)
+    // First vote (1000 stake) doesn't reach threshold
+    let result1 = state.vote_storage_proposal(&proposal_id, proposer.hotkey(), true);
+    assert_eq!(result1, None);
+    // Second vote (2000 stake total) reaches 35% threshold
+    let result2 = state.vote_storage_proposal(&proposal_id, voter1.hotkey(), true);
+    assert_eq!(result2, Some(true));
 
     // Proposal should now be finalized
     let fetched = state.get_storage_proposal(&proposal_id);
