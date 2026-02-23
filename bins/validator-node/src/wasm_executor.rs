@@ -954,16 +954,23 @@ impl WasmChallengeExecutor {
             return Ok(Vec::new());
         };
 
-        let weight_entries: Vec<WeightEntry> = bincode::deserialize(&result_data)
-            .context("Failed to deserialize get_weights output as Vec<WeightEntry>")?;
-
-        let weights: Vec<platform_challenge_sdk::WeightAssignment> = weight_entries
-            .into_iter()
-            .map(|entry| platform_challenge_sdk::WeightAssignment {
-                hotkey: format!("uid:{}", entry.uid),
-                weight: entry.weight as f64 / 65535.0,
-            })
-            .collect();
+        // Try hotkey-based WeightAssignment first (bounty-challenge, modern challenges),
+        // then fall back to UID-based WeightEntry (legacy challenges).
+        let weights: Vec<platform_challenge_sdk::WeightAssignment> = if let Ok(assignments) =
+            bincode::deserialize::<Vec<platform_challenge_sdk::WeightAssignment>>(&result_data)
+        {
+            assignments
+        } else {
+            let weight_entries: Vec<WeightEntry> = bincode::deserialize(&result_data)
+                    .context("Failed to deserialize get_weights output as Vec<WeightEntry> or Vec<WeightAssignment>")?;
+            weight_entries
+                .into_iter()
+                .map(|entry| platform_challenge_sdk::WeightAssignment {
+                    hotkey: format!("uid:{}", entry.uid),
+                    weight: entry.weight as f64 / 65535.0,
+                })
+                .collect()
+        };
 
         info!(
             module = module_path,
