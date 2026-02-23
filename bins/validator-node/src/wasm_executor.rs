@@ -201,7 +201,7 @@ impl WasmChallengeExecutor {
             restart_id: String::new(),
             config_version: 0,
             storage_host_config: StorageHostConfig {
-                allow_direct_writes: true,
+                allow_direct_writes: false,
                 require_consensus: true,
                 ..self.config.storage_host_config.clone()
             },
@@ -329,7 +329,7 @@ impl WasmChallengeExecutor {
             restart_id: String::new(),
             config_version: 0,
             storage_host_config: StorageHostConfig {
-                allow_direct_writes: true,
+                allow_direct_writes: false,
                 require_consensus: true,
                 ..self.config.storage_host_config.clone()
             },
@@ -808,7 +808,7 @@ impl WasmChallengeExecutor {
             restart_id: String::new(),
             config_version: 0,
             storage_host_config: StorageHostConfig {
-                allow_direct_writes: true,
+                allow_direct_writes: false,
                 require_consensus: true,
                 ..self.config.storage_host_config.clone()
             },
@@ -966,7 +966,7 @@ impl WasmChallengeExecutor {
             challenge_id: module_path.to_string(),
             validator_id: "validator".to_string(),
             storage_host_config: StorageHostConfig {
-                allow_direct_writes: true,
+                allow_direct_writes: false,
                 require_consensus: true,
                 ..self.config.storage_host_config.clone()
             },

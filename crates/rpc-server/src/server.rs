@@ -543,6 +543,26 @@ async fn webhook_progress_handler(handler: Arc<RpcHandler>, body: Value) -> impl
         );
     }
 
+    // Verify hotkey belongs to a known validator
+    let hotkey_str = validator_hotkey.unwrap();
+    let is_known_validator = {
+        if let Some(hk) = platform_core::Hotkey::from_hex(hotkey_str) {
+            let chain = handler.chain_state.read();
+            chain.validators.contains_key(&hk)
+        } else {
+            false
+        }
+    };
+    if !is_known_validator {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "invalid_validator",
+                "message": "Webhook caller is not a registered validator"
+            })),
+        );
+    }
+
     // Parse the progress data
     let msg_type = body.get("type").and_then(|v| v.as_str()).unwrap_or("");
 

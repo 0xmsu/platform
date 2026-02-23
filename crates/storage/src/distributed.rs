@@ -615,12 +615,11 @@ impl DistributedStorage {
 
     /// Count entries in category
     fn count_category(&self, challenge_id: &str, category: Category) -> usize {
-        let prefix = format!(
-            "{}:{}",
-            challenge_id,
-            std::str::from_utf8(category.prefix()).unwrap_or("")
-        );
-        self.data_tree.scan_prefix(prefix.as_bytes()).count()
+        let mut prefix = Vec::with_capacity(category.prefix().len() + challenge_id.len() + 1);
+        prefix.extend_from_slice(category.prefix());
+        prefix.extend_from_slice(challenge_id.as_bytes());
+        prefix.push(b':');
+        self.data_tree.scan_prefix(&prefix).count()
     }
 
     /// Get raw entry without deserialization
@@ -630,14 +629,9 @@ impl DistributedStorage {
         challenge_id: &str,
         key: &str,
     ) -> Result<Option<StoredEntry>, StorageError> {
-        let storage_key = format!(
-            "{}:{}:{}",
-            challenge_id,
-            std::str::from_utf8(category.prefix()).unwrap_or(""),
-            key
-        );
+        let storage_key = build_key(category, challenge_id, key);
 
-        match self.data_tree.get(storage_key.as_bytes()) {
+        match self.data_tree.get(&storage_key) {
             Ok(Some(bytes)) => {
                 let entry = StoredEntry::from_bytes(&bytes)?;
                 Ok(Some(entry))

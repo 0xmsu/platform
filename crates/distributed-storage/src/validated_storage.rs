@@ -517,9 +517,16 @@ impl<S: DistributedStore + 'static> ValidatedStorage<S> {
         {
             let voters = self.valid_voters.read().await;
             if !voters.is_empty() {
-                let vote_hash = vote.compute_hash();
+                // H7 fix: Use raw serialized vote fields instead of hash to match signing side
+                let vote_bytes = bincode::serialize(&(
+                    vote.proposal_id,
+                    vote.voter.clone(),
+                    vote.approved,
+                    vote.timestamp,
+                ))
+                .unwrap_or_default();
                 let signed_msg = platform_core::SignedMessage {
-                    message: vote_hash.to_vec(),
+                    message: vote_bytes,
                     signature: vote.signature.clone(),
                     signer: vote.voter.clone(),
                 };

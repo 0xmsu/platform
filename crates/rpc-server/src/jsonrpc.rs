@@ -1203,6 +1203,48 @@ impl RpcHandler {
         // Use resolved_id for routing
         let challenge_id = resolved_id;
 
+        // Enforce auth on routes that require it (matching HTTP handler behavior)
+        {
+            let chain = self.chain_state.read();
+            let challenge_uuid_check = uuid::Uuid::parse_str(&challenge_id)
+                .ok()
+                .map(platform_core::ChallengeId);
+
+            if let Some(cid) = challenge_uuid_check.as_ref() {
+                if let Some(chain_routes) = chain.challenge_routes.get(cid) {
+                    use platform_challenge_sdk::HttpMethod;
+                    for r in chain_routes {
+                        let http_method = match r.method.to_uppercase().as_str() {
+                            "GET" => HttpMethod::Get,
+                            "POST" => HttpMethod::Post,
+                            "PUT" => HttpMethod::Put,
+                            "DELETE" => HttpMethod::Delete,
+                            "PATCH" => HttpMethod::Patch,
+                            _ => HttpMethod::Get,
+                        };
+                        let mut route = platform_challenge_sdk::ChallengeRoute::new(
+                            http_method,
+                            r.path.clone(),
+                            r.description.clone(),
+                        );
+                        if r.requires_auth {
+                            route = route.with_auth();
+                        }
+                        if route.matches(&method, &path).is_some() {
+                            if r.requires_auth && auth_hotkey.is_none() {
+                                return JsonRpcResponse::error(
+                                    id,
+                                    UNAUTHORIZED,
+                                    "This route requires authentication",
+                                );
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         // Extract path params by matching against registered route definitions
         let path_params = {
             let chain = self.chain_state.read();

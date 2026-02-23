@@ -1374,8 +1374,20 @@ fn update_validator_set_from_metagraph(
         }
 
         // Sync to ChainState
-        cs.registered_hotkeys.insert(hotkey);
+        cs.registered_hotkeys.insert(hotkey.clone());
+
+        // H5 fix: Also update cs.validators so RPC webhook auth can find metagraph-registered validators
+        // Use the same min_stake threshold as the P2P validator set (10000 TAO = 10e12 RAO)
+        if stake >= 10_000_000_000_000 {
+            cs.validators.entry(hotkey.clone()).or_insert_with(|| {
+                platform_core::ValidatorInfo::new(hotkey, platform_core::Stake(stake))
+            });
+        }
     }
+
+    // TODO(C3): When ValidatedStorage and StateRootConsensus instances are wired into the main
+    // event loop, they should call `set_valid_voters()` with the validator hotkeys collected here
+    // to enable cryptographic vote verification in distributed storage consensus layers.
 
     cs.update_hash();
 }
