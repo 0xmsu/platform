@@ -983,12 +983,10 @@ impl P2PNetwork {
                 peer_id,
                 topic,
             })) => {
-                let hotkey = self
-                    .peer_mapping
-                    .get_hotkey(&peer_id)
-                    .map(|h| h.to_ss58())
-                    .unwrap_or_else(|| "unknown".to_string());
-                info!(peer = %peer_id, hotkey = %hotkey, topic = %topic, "Peer subscribed to topic");
+                // Only log if peer has identified hotkey
+                if let Some(hotkey) = self.peer_mapping.get_hotkey(&peer_id) {
+                    info!(peer = %peer_id, hotkey = %hotkey.to_ss58(), topic = %topic, "Peer subscribed to topic");
+                }
             }
             SwarmEvent::Behaviour(CombinedEvent::Kademlia(kad::Event::RoutingUpdated {
                 peer,
@@ -1332,18 +1330,16 @@ impl NetworkRunner {
                 .handle_gossipsub_message(propagation_source, &message.data)
             {
                 Ok(msg) => {
-                    let hotkey = self
-                        .network
-                        .peer_mapping
-                        .get_hotkey(&propagation_source)
-                        .map(|h| h.to_ss58())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    debug!(
-                        source = %propagation_source,
-                        hotkey = %hotkey,
-                        msg_type = %msg.type_name(),
-                        "Received gossipsub message"
-                    );
+                    // Only log with known hotkey
+                    if let Some(hotkey) = self.network.peer_mapping.get_hotkey(&propagation_source)
+                    {
+                        debug!(
+                            source = %propagation_source,
+                            hotkey = %hotkey.to_ss58(),
+                            msg_type = %msg.type_name(),
+                            "Received gossipsub message"
+                        );
+                    }
                     if let Err(e) = self
                         .event_tx
                         .send(NetworkEvent::Message {
@@ -1356,17 +1352,15 @@ impl NetworkRunner {
                     }
                 }
                 Err(e) => {
-                    // Try to extract hotkey from message for debugging
-                    let hotkey = bincode::deserialize::<SignedP2PMessage>(&message.data)
-                        .ok()
-                        .map(|m| m.signer.to_ss58())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    warn!(
-                        source = %propagation_source,
-                        hotkey = %hotkey,
-                        error = %e,
-                        "Failed to process gossipsub message"
-                    );
+                    // Only log errors if we can identify the peer
+                    if let Ok(signed) = bincode::deserialize::<SignedP2PMessage>(&message.data) {
+                        warn!(
+                            source = %propagation_source,
+                            hotkey = %signed.signer.to_ss58(),
+                            error = %e,
+                            "Failed to process gossipsub message"
+                        );
+                    }
                 }
             }
         }

@@ -1594,7 +1594,7 @@ async fn handle_network_event(
                     if hb.core_state_hash != [0u8; 32] && hb.core_state_hash != our_core_hash {
                         let our_mutation_seq = chain_state.read().mutation_sequence;
                         debug!(
-                            peer = %hb.validator.to_hex(),
+                            peer = %hb.validator.to_ss58(),
                             peer_core_hash = %hex::encode(&hb.core_state_hash[..8]),
                             our_core_hash = %hex::encode(&our_core_hash[..8]),
                             "Core state hash divergence detected, requesting sync"
@@ -1629,7 +1629,7 @@ async fn handle_network_event(
                 info!(
                     submission_id = %sub.submission_id,
                     challenge_id = %sub.challenge_id,
-                    miner = %sub.miner.to_hex(),
+                    miner = %sub.miner.to_ss58(),
                     "Received submission from P2P network"
                 );
                 let already_exists = state_manager
@@ -1663,7 +1663,7 @@ async fn handle_network_event(
             P2PMessage::Evaluation(eval) => {
                 info!(
                     submission_id = %eval.submission_id,
-                    validator = %eval.validator.to_hex(),
+                    validator = %eval.validator.to_ss58(),
                     score = eval.score,
                     "Received evaluation from peer validator"
                 );
@@ -1687,14 +1687,14 @@ async fn handle_network_event(
                     ) {
                         warn!(
                             submission_id = %eval.submission_id,
-                            validator = %validator_hotkey.to_hex(),
+                            validator = %validator_hotkey.to_ss58(),
                             error = %e,
                             "Failed to add peer evaluation to state"
                         );
                     } else {
                         debug!(
                             submission_id = %eval.submission_id,
-                            validator = %validator_hotkey.to_hex(),
+                            validator = %validator_hotkey.to_ss58(),
                             score = eval.score,
                             "Peer evaluation recorded in state"
                         );
@@ -1703,28 +1703,28 @@ async fn handle_network_event(
             }
             P2PMessage::StateRequest(req) => {
                 debug!(
-                    requester = %req.requester.to_hex(),
+                    requester = %req.requester.to_ss58(),
                     sequence = req.current_sequence,
                     "Received state request"
                 );
             }
             P2PMessage::StateResponse(resp) => {
                 debug!(
-                    responder = %resp.responder.to_hex(),
+                    responder = %resp.responder.to_ss58(),
                     sequence = resp.sequence,
                     "Received state response"
                 );
             }
             P2PMessage::WeightVote(wv) => {
                 debug!(
-                    validator = %wv.validator.to_hex(),
+                    validator = %wv.validator.to_ss58(),
                     epoch = wv.epoch,
                     "Received weight vote"
                 );
             }
             P2PMessage::PeerAnnounce(pa) => {
                 debug!(
-                    validator = %pa.validator.to_hex(),
+                    validator = %pa.validator.to_ss58(),
                     peer_id = %pa.peer_id,
                     addresses = pa.addresses.len(),
                     "Received peer announce"
@@ -1732,7 +1732,7 @@ async fn handle_network_event(
             }
             P2PMessage::JobClaim(claim) => {
                 info!(
-                    validator = %claim.validator.to_hex(),
+                    validator = %claim.validator.to_ss58(),
                     challenge_id = %claim.challenge_id,
                     max_jobs = claim.max_jobs,
                     "Received job claim"
@@ -1742,8 +1742,8 @@ async fn handle_network_event(
                 info!(
                     submission_id = %assignment.submission_id,
                     challenge_id = %assignment.challenge_id,
-                    assigned_validator = %assignment.assigned_validator.to_hex(),
-                    assigner = %assignment.assigner.to_hex(),
+                    assigned_validator = %assignment.assigned_validator.to_ss58(),
+                    assigner = %assignment.assigner.to_ss58(),
                     "Received job assignment"
                 );
                 let job = JobRecord {
@@ -1761,14 +1761,14 @@ async fn handle_network_event(
             P2PMessage::DataRequest(req) => {
                 debug!(
                     request_id = %req.request_id,
-                    requester = %req.requester.to_hex(),
+                    requester = %req.requester.to_ss58(),
                     challenge_id = %req.challenge_id,
                     data_type = %req.data_type,
                     "Received data request"
                 );
 
                 if !validator_set.is_validator(&req.requester) {
-                    warn!(requester = %req.requester.to_hex(), "Data request from unknown validator");
+                    warn!(requester = %req.requester.to_ss58(), "Data request from unknown validator");
                 } else if req.data_type == "challenge_storage" {
                     // Respond with storage data for the requested challenge
                     let challenge_id_str = req.challenge_id.to_string();
@@ -1836,14 +1836,14 @@ async fn handle_network_event(
             P2PMessage::DataResponse(resp) => {
                 debug!(
                     request_id = %resp.request_id,
-                    responder = %resp.responder.to_hex(),
+                    responder = %resp.responder.to_ss58(),
                     challenge_id = %resp.challenge_id,
                     data_bytes = resp.data.len(),
                     "Received data response"
                 );
 
                 if !validator_set.is_validator(&resp.responder) {
-                    warn!(responder = %resp.responder.to_hex(), "Data response from unknown validator");
+                    warn!(responder = %resp.responder.to_ss58(), "Data response from unknown validator");
                 } else if resp.data_type == "challenge_storage" {
                     // Merge storage data from peer
                     match bincode::deserialize::<Vec<(String, Vec<u8>)>>(&resp.data) {
@@ -1901,7 +1901,7 @@ async fn handle_network_event(
                 debug!(
                     submission_id = %progress.submission_id,
                     challenge_id = %progress.challenge_id,
-                    validator = %progress.validator.to_hex(),
+                    validator = %progress.validator.to_ss58(),
                     task_index = progress.task_index,
                     total_tasks = progress.total_tasks,
                     progress_pct = progress.progress_pct,
@@ -1925,7 +1925,7 @@ async fn handle_network_event(
                 info!(
                     submission_id = %result.submission_id,
                     challenge_id = %result.challenge_id,
-                    validator = %result.validator.to_hex(),
+                    validator = %result.validator.to_ss58(),
                     task_id = %result.task_id,
                     passed = result.passed,
                     score = result.score,
@@ -1935,7 +1935,7 @@ async fn handle_network_event(
             }
             P2PMessage::LeaderboardRequest(req) => {
                 debug!(
-                    requester = %req.requester.to_hex(),
+                    requester = %req.requester.to_ss58(),
                     challenge_id = %req.challenge_id,
                     limit = req.limit,
                     offset = req.offset,
@@ -1944,14 +1944,14 @@ async fn handle_network_event(
             }
             P2PMessage::LeaderboardResponse(resp) => {
                 debug!(
-                    responder = %resp.responder.to_hex(),
+                    responder = %resp.responder.to_ss58(),
                     challenge_id = %resp.challenge_id,
                     total_count = resp.total_count,
                     "Received leaderboard response"
                 );
             }
             P2PMessage::ChallengeUpdate(update) => {
-                let updater_ss58 = update.updater.to_hex();
+                let updater_ss58 = update.updater.to_ss58();
                 if updater_ss58 == platform_p2p_consensus::SUDO_HOTKEY
                     || update.updater.0 == platform_core::SUDO_KEY_BYTES
                 {
@@ -2192,7 +2192,7 @@ async fn handle_network_event(
                 info!(
                     proposal_id = %hex::encode(&proposal.proposal_id[..8]),
                     challenge_id = %proposal.challenge_id,
-                    proposer = %proposal.proposer.to_hex(),
+                    proposer = %proposal.proposer.to_ss58(),
                     key_len = proposal.key.len(),
                     value_len = proposal.value.len(),
                     "Received storage proposal"
@@ -2203,7 +2203,7 @@ async fn handle_network_event(
 
                 if !proposer_valid {
                     warn!(
-                        proposer = %proposal.proposer.to_hex(),
+                        proposer = %proposal.proposer.to_ss58(),
                         "Storage proposal from unknown validator, ignoring"
                     );
                 } else {
@@ -2271,14 +2271,14 @@ async fn handle_network_event(
             P2PMessage::StorageVote(vote) => {
                 debug!(
                     proposal_id = %hex::encode(&vote.proposal_id[..8]),
-                    voter = %vote.voter.to_hex(),
+                    voter = %vote.voter.to_ss58(),
                     approve = vote.approve,
                     "Received storage vote"
                 );
 
                 // Verify voter is a known validator
                 if !validator_set.is_validator(&vote.voter) {
-                    warn!(voter = %vote.voter.to_hex(), "Vote from unknown validator");
+                    warn!(voter = %vote.voter.to_ss58(), "Vote from unknown validator");
                 } else {
                     // Add vote to proposal
                     let consensus_result = state_manager.apply(|state| {
@@ -2353,7 +2353,7 @@ async fn handle_network_event(
             P2PMessage::ReviewAssignment(msg) => {
                 debug!(
                     submission_id = %msg.submission_id,
-                    assigner = %msg.assigner.to_hex(),
+                    assigner = %msg.assigner.to_ss58(),
                     assigned_count = msg.assigned_validators.len(),
                     "Received review assignment"
                 );
@@ -2362,7 +2362,7 @@ async fn handle_network_event(
                 let safe_reason = sanitize_for_log(&msg.reason);
                 debug!(
                     submission_id = %msg.submission_id,
-                    validator = %msg.validator.to_hex(),
+                    validator = %msg.validator.to_ss58(),
                     reason = %safe_reason,
                     "Received review decline"
                 );
@@ -2370,7 +2370,7 @@ async fn handle_network_event(
             P2PMessage::ReviewResult(msg) => {
                 debug!(
                     submission_id = %msg.submission_id,
-                    validator = %msg.validator.to_hex(),
+                    validator = %msg.validator.to_ss58(),
                     score = msg.score,
                     "Received review result"
                 );
@@ -2383,7 +2383,7 @@ async fn handle_network_event(
                 } else {
                     debug!(
                         submission_id = %msg.submission_id,
-                        validator = %msg.validator_hotkey.to_hex(),
+                        validator = %msg.validator_hotkey.to_ss58(),
                         "Received valid agent log proposal"
                     );
                     // Store in chain state for consensus
@@ -2398,7 +2398,7 @@ async fn handle_network_event(
             }
             P2PMessage::StorageRootSync(msg) => {
                 if !validator_set.is_validator(&msg.validator) {
-                    warn!(validator = %msg.validator.to_hex(), "Storage root sync from unknown validator");
+                    warn!(validator = %msg.validator.to_ss58(), "Storage root sync from unknown validator");
                 } else {
                     let local_roots: Vec<(platform_core::ChallengeId, [u8; 32])> = state_manager
                         .apply(|state| {
@@ -2419,7 +2419,7 @@ async fn handle_network_event(
                         if needs_sync {
                             info!(
                                 challenge_id = %cid,
-                                remote_validator = %msg.validator.to_hex(),
+                                remote_validator = %msg.validator.to_ss58(),
                                 "Storage divergence detected, requesting challenge data"
                             );
 
@@ -2460,12 +2460,12 @@ async fn handle_network_event(
                 info!(
                     proposal_id = %hex::encode(&proposal.proposal_id[..8]),
                     mutation_type = ?proposal.mutation_type,
-                    proposer = %proposal.proposer.to_hex(),
+                    proposer = %proposal.proposer.to_ss58(),
                     "Received state mutation proposal"
                 );
 
                 if !validator_set.is_validator(&proposal.proposer) {
-                    warn!(proposer = %proposal.proposer.to_hex(), "State mutation from unknown validator");
+                    warn!(proposer = %proposal.proposer.to_ss58(), "State mutation from unknown validator");
                 } else {
                     // Add proposal to P2P state
                     let entry = platform_p2p_consensus::StateMutationEntry {
@@ -2494,7 +2494,7 @@ async fn handle_network_event(
                         }
                         platform_p2p_consensus::StateMutationType::SudoAction => {
                             // Verify proposer is sudo
-                            let proposer_hex = proposal.proposer.to_hex();
+                            let proposer_hex = proposal.proposer.to_ss58();
                             proposer_hex == platform_p2p_consensus::SUDO_HOTKEY
                                 || proposal.proposer.0 == platform_core::SUDO_KEY_BYTES
                         }
@@ -2529,13 +2529,13 @@ async fn handle_network_event(
             P2PMessage::StateMutationVote(vote) => {
                 debug!(
                     proposal_id = %hex::encode(&vote.proposal_id[..8]),
-                    voter = %vote.voter.to_hex(),
+                    voter = %vote.voter.to_ss58(),
                     approve = vote.approve,
                     "Received state mutation vote"
                 );
 
                 if !validator_set.is_validator(&vote.voter) {
-                    warn!(voter = %vote.voter.to_hex(), "State mutation vote from unknown validator");
+                    warn!(voter = %vote.voter.to_ss58(), "State mutation vote from unknown validator");
                 } else {
                     let consensus_result = state_manager.apply(|state| {
                         state.vote_state_mutation(
@@ -2646,13 +2646,13 @@ async fn handle_network_event(
             }
             P2PMessage::CoreStateRequest(req) => {
                 info!(
-                    requester = %req.requester.to_hex(),
+                    requester = %req.requester.to_ss58(),
                     mutation_seq = req.mutation_sequence,
                     "Received core state sync request"
                 );
 
                 if !validator_set.is_validator(&req.requester) {
-                    warn!(requester = %req.requester.to_hex(), "Core state request from unknown validator");
+                    warn!(requester = %req.requester.to_ss58(), "Core state request from unknown validator");
                 } else {
                     let cs = chain_state.read();
                     let state_data = serde_json::to_vec(&*cs).unwrap_or_default();
@@ -2687,13 +2687,13 @@ async fn handle_network_event(
             }
             P2PMessage::CoreStateResponse(resp) => {
                 info!(
-                    responder = %resp.responder.to_hex(),
+                    responder = %resp.responder.to_ss58(),
                     mutation_seq = resp.mutation_sequence,
                     "Received core state sync response"
                 );
 
                 if !validator_set.is_validator(&resp.responder) {
-                    warn!(responder = %resp.responder.to_hex(), "Core state response from unknown validator");
+                    warn!(responder = %resp.responder.to_ss58(), "Core state response from unknown validator");
                 } else {
                     // Deserialize and merge
                     match serde_json::from_slice::<platform_core::ChainState>(&resp.state_data) {
