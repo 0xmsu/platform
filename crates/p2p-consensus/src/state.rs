@@ -628,7 +628,8 @@ impl ChainState {
     }
 
     /// Add a vote to a storage proposal
-    /// Consensus requires 35% of total stake to approve/reject
+    /// During bootstrap: proposals from the bootstrap validator are auto-accepted.
+    /// After bootstrap: consensus requires 35% of total stake to approve/reject.
     pub fn vote_storage_proposal(
         &mut self,
         proposal_id: &[u8; 32],
@@ -638,10 +639,27 @@ impl ChainState {
         // Calculate total stake
         let total_stake: u64 = self.validators.values().sum();
 
+        let in_bootstrap = self.is_in_bootstrap_period();
+
         if let Some(proposal) = self.pending_storage_proposals.get_mut(proposal_id) {
             if proposal.finalized {
                 return None;
             }
+
+            // During bootstrap, auto-accept proposals from the bootstrap validator
+            if in_bootstrap
+                && proposal.proposer.to_ss58() == platform_core::constants::BOOTSTRAP_VALIDATOR_SS58
+            {
+                tracing::info!(
+                    proposal_id = %hex::encode(&proposal_id[..8]),
+                    proposer = %proposal.proposer.to_ss58(),
+                    "Bootstrap period: auto-accepting proposal from bootstrap validator"
+                );
+                proposal.finalized = true;
+                self.increment_sequence();
+                return Some(true);
+            }
+
             proposal.votes.insert(voter.clone(), approve);
 
             if total_stake == 0 {

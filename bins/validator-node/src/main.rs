@@ -1326,6 +1326,18 @@ async fn main() -> Result<()> {
                                     state.set_challenge_active(&challenge_id, false);
                                 });
                                 info!(challenge_id = %challenge_id, "Challenge deactivated locally");
+                            } else if update_type == "remove" {
+                                // Remove challenge from both states and delete WASM
+                                mutate_and_persist(storage.clone(), chain_state.clone(), "remove_local", |cs| {
+                                    cs.remove_wasm_challenge(&challenge_id);
+                                }).await;
+                                state_manager.apply(|state| {
+                                    state.remove_challenge(&challenge_id);
+                                });
+                                let challenge_id_str = challenge_id.to_string();
+                                let wasm_key = StorageKey::new("wasm", &challenge_id_str);
+                                let _ = storage.delete(&wasm_key).await;
+                                info!(challenge_id = %challenge_id, "Challenge removed locally");
                             }
                         }
                     }
@@ -2574,6 +2586,24 @@ async fn handle_network_event(
                                 }
                             }
                         }
+                        "remove" => {
+                            let cid = update.challenge_id;
+                            mutate_and_persist(
+                                storage.clone(),
+                                chain_state.clone(),
+                                "remove_p2p",
+                                |cs| {
+                                    cs.remove_wasm_challenge(&cid);
+                                },
+                            )
+                            .await;
+                            state_manager.apply(|state| {
+                                state.remove_challenge(&cid);
+                            });
+                            let wasm_key = StorageKey::new("wasm", &challenge_id_str);
+                            let _ = storage.delete(&wasm_key).await;
+                            info!(challenge_id = %cid, "Challenge removed via P2P");
+                        }
                         other => {
                             warn!(
                                 challenge_id = %update.challenge_id,
@@ -2665,9 +2695,47 @@ async fn handle_network_event(
                     });
 
                     // Add our own vote locally (we don't receive our own broadcasts)
-                    state_manager.apply(|state| {
-                        state.vote_storage_proposal(&proposal.proposal_id, my_hotkey, approve);
+                    let consensus_result = state_manager.apply(|state| {
+                        state.vote_storage_proposal(&proposal.proposal_id, my_hotkey, approve)
                     });
+
+                    // If consensus reached immediately (e.g. bootstrap auto-accept), write now
+                    if let Some(true) = consensus_result {
+                        let proposal_opt = state_manager
+                            .apply(|state| state.remove_storage_proposal(&proposal.proposal_id));
+                        if let Some(p) = proposal_opt {
+                            let storage_key =
+                                StorageKey::new(&p.challenge_id.to_string(), hex::encode(&p.key));
+                            let result = if p.value.is_empty() {
+                                storage.delete(&storage_key).await
+                            } else {
+                                storage
+                                    .put(
+                                        storage_key.clone(),
+                                        p.value.clone(),
+                                        put_options_with_block(&state_manager),
+                                    )
+                                    .await
+                                    .map(|_| true)
+                            };
+                            match result {
+                                Ok(_) => {
+                                    info!(
+                                        proposal_id = %hex::encode(&p.proposal_id[..8]),
+                                        challenge_id = %p.challenge_id,
+                                        "Bootstrap: proposal auto-accepted and written"
+                                    );
+                                }
+                                Err(e) => {
+                                    error!(
+                                        proposal_id = %hex::encode(&p.proposal_id[..8]),
+                                        error = %e,
+                                        "Failed to write bootstrap-accepted proposal"
+                                    );
+                                }
+                            }
+                        }
+                    }
 
                     if let Err(e) = p2p_cmd_tx
                         .send(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg))

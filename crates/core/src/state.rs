@@ -522,6 +522,16 @@ impl ChainState {
         self.increment_mutation_sequence();
     }
 
+    /// Remove a WASM challenge and its routes
+    pub fn remove_wasm_challenge(&mut self, challenge_id: &ChallengeId) -> bool {
+        let removed = self.wasm_challenge_configs.remove(challenge_id).is_some();
+        self.challenge_routes.remove(challenge_id);
+        if removed {
+            self.increment_mutation_sequence();
+        }
+        removed
+    }
+
     /// List all WASM challenge configurations
     pub fn list_wasm_challenges(&self) -> &HashMap<ChallengeId, WasmChallengeConfig> {
         &self.wasm_challenge_configs
