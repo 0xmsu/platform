@@ -6,8 +6,118 @@ use crate::{
     WasmChallengeConfig,
 };
 // Note: ChallengeWeightAllocation and MechanismWeightConfig kept for backward compat of existing fields
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
+
+/// Helper module for serializing HashMap<Hotkey, V> as Vec<(String, V)> for JSON compatibility
+mod hotkey_map_serde {
+    use super::*;
+
+    pub fn serialize<V, S>(
+        map: &HashMap<Hotkey, V>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        V: Serialize,
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut ser_map = serializer.serialize_map(Some(map.len()))?;
+        for (k, v) in map {
+            ser_map.serialize_entry(&k.to_hex(), v)?;
+        }
+        ser_map.end()
+    }
+
+    pub fn deserialize<'de, V, D>(
+        deserializer: D,
+    ) -> std::result::Result<HashMap<Hotkey, V>, D::Error>
+    where
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        let string_map: HashMap<String, V> = HashMap::deserialize(deserializer)?;
+        let mut result = HashMap::new();
+        for (k, v) in string_map {
+            if let Some(hotkey) = Hotkey::from_hex(&k) {
+                result.insert(hotkey, v);
+            }
+        }
+        Ok(result)
+    }
+}
+
+/// Helper module for serializing HashMap<ChallengeId, V> as Vec<(String, V)> for JSON compatibility
+mod challenge_id_map_serde {
+    use super::*;
+
+    pub fn serialize<V, S>(
+        map: &HashMap<ChallengeId, V>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        V: Serialize,
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut ser_map = serializer.serialize_map(Some(map.len()))?;
+        for (k, v) in map {
+            ser_map.serialize_entry(&k.to_string(), v)?;
+        }
+        ser_map.end()
+    }
+
+    pub fn deserialize<'de, V, D>(
+        deserializer: D,
+    ) -> std::result::Result<HashMap<ChallengeId, V>, D::Error>
+    where
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        let string_map: HashMap<String, V> = HashMap::deserialize(deserializer)?;
+        let mut result = HashMap::new();
+        for (k, v) in string_map {
+            let id = ChallengeId::from_string(&k);
+            result.insert(id, v);
+        }
+        Ok(result)
+    }
+}
+
+/// Helper module for serializing HashSet<Hotkey> as Vec<String> for JSON compatibility
+mod hotkey_set_serde {
+    use super::*;
+    use std::collections::HashSet;
+
+    pub fn serialize<S>(
+        set: &HashSet<Hotkey>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(set.len()))?;
+        for k in set {
+            seq.serialize_element(&k.to_hex())?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<HashSet<Hotkey>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let strings: Vec<String> = Vec::deserialize(deserializer)?;
+        let mut result = HashSet::new();
+        for s in strings {
+            if let Some(hotkey) = Hotkey::from_hex(&s) {
+                result.insert(hotkey);
+            }
+        }
+        Ok(result)
+    }
+}
 
 /// Required validator version (set by Sudo)
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,15 +149,15 @@ pub struct ChainState {
     pub sudo_key: Hotkey,
 
     /// Active validators
-    #[serde(default)]
+    #[serde(default, with = "hotkey_map_serde")]
     pub validators: HashMap<Hotkey, ValidatorInfo>,
 
     /// Active challenges (legacy, for SDK-based challenges)
-    #[serde(default)]
+    #[serde(default, with = "challenge_id_map_serde")]
     pub challenges: HashMap<ChallengeId, Challenge>,
 
     /// WASM challenge configurations (metadata only)
-    #[serde(default)]
+    #[serde(default, with = "challenge_id_map_serde")]
     pub wasm_challenge_configs: HashMap<ChallengeId, WasmChallengeConfig>,
 
     /// Mechanism weight configurations (mechanism_id -> config)
@@ -55,7 +165,7 @@ pub struct ChainState {
     pub mechanism_configs: HashMap<u8, MechanismWeightConfig>,
 
     /// Challenge weight allocations (challenge_id -> allocation)
-    #[serde(default)]
+    #[serde(default, with = "challenge_id_map_serde")]
     pub challenge_weights: HashMap<ChallengeId, ChallengeWeightAllocation>,
 
     /// Required validator version
@@ -77,12 +187,12 @@ pub struct ChainState {
     /// All registered hotkeys from metagraph (miners + validators)
     /// Updated during metagraph sync, used for submission verification
     /// Added in V2
-    #[serde(default)]
+    #[serde(default, with = "hotkey_set_serde")]
     pub registered_hotkeys: std::collections::HashSet<Hotkey>,
 
     /// Challenge routes (challenge_id -> routes)
     /// Loaded from WASM modules after ChallengeUpdate
-    #[serde(default)]
+    #[serde(default, with = "challenge_id_map_serde")]
     pub challenge_routes: HashMap<ChallengeId, Vec<ChallengeRouteInfo>>,
 
     /// Whether the network is paused (set by sudo EmergencyPause)
