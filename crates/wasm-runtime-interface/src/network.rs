@@ -205,8 +205,16 @@ impl NetworkState {
             resolver_opts.negative_max_ttl = Some(ttl);
         }
 
-        let dns_resolver = Resolver::new(ResolverConfig::default(), resolver_opts)
-            .map_err(|err| NetworkStateError::DnsResolver(err.to_string()))?;
+        // Create DNS resolver in a dedicated thread to avoid
+        // "Cannot start a runtime from within a runtime" panic when
+        // trust-dns internally calls block_on during initialization.
+        let dns_resolver =
+            std::thread::spawn(move || Resolver::new(ResolverConfig::default(), resolver_opts))
+                .join()
+                .map_err(|_| {
+                    NetworkStateError::DnsResolver("DNS resolver thread panicked".to_string())
+                })?
+                .map_err(|err| NetworkStateError::DnsResolver(err.to_string()))?;
 
         Ok(Self {
             policy: validated,
