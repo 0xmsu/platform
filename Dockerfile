@@ -145,8 +145,20 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD test -e /data/distributed.db || exit 1
 
-# Default entrypoint
-ENTRYPOINT ["validator-node"]
+# Entrypoint wrapper: restart validator after 60s delay on crash
+COPY <<'WRAPPER' /usr/local/bin/entrypoint.sh
+#!/bin/sh
+while true; do
+    echo "[entrypoint] Starting validator-node..."
+    validator-node "$@"
+    EXIT_CODE=$?
+    echo "[entrypoint] validator-node exited with code $EXIT_CODE, restarting in 60s..."
+    sleep 60
+done
+WRAPPER
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["--data-dir", "/data", "--listen-addr", "/ip4/0.0.0.0/tcp/8090"]
 
 # Labels
