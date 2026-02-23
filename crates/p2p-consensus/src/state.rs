@@ -383,6 +383,7 @@ pub struct StorageProposal {
     pub value: Vec<u8>,
     pub timestamp: i64,
     /// Votes received (voter -> approve)
+    #[serde(default, with = "hotkey_map_serde")]
     pub votes: HashMap<Hotkey, bool>,
     /// Whether this proposal has been finalized
     pub finalized: bool,
@@ -398,6 +399,7 @@ pub struct StateMutationEntry {
     pub timestamp: i64,
     pub mutation_sequence: u64,
     /// Votes received (voter -> approve)
+    #[serde(default, with = "hotkey_map_serde")]
     pub votes: HashMap<Hotkey, bool>,
     /// Whether finalized
     pub finalized: bool,
