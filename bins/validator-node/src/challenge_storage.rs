@@ -173,16 +173,19 @@ impl StorageBackend for ChallengeStorageBackend {
         prefix: &[u8],
         limit: u32,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageHostError> {
-        let prefix_bytes = if prefix.is_empty() {
+        // Keys are stored hex-encoded (see build_challenge_storage_key),
+        // so the prefix must also be hex-encoded for the scan to match.
+        let hex_prefix = hex::encode(prefix);
+        let prefix_filter: Option<&[u8]> = if prefix.is_empty() {
             None
         } else {
-            Some(prefix)
+            Some(hex_prefix.as_bytes())
         };
 
         let result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(self.storage.list_prefix(
                 challenge_id,
-                prefix_bytes,
+                prefix_filter,
                 limit as usize,
                 None,
             ))
