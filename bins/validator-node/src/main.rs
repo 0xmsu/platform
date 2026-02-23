@@ -92,6 +92,12 @@ where
     result
 }
 
+/// Create PutOptions with the current block number for tracking
+fn put_options_with_block(state_manager: &StateManager) -> PutOptions {
+    let block = state_manager.apply(|state| state.bittensor_block);
+    PutOptions::with_block(block)
+}
+
 // ==================== Shutdown Handler ====================
 
 /// Handles graceful shutdown with state persistence
@@ -1519,12 +1525,13 @@ async fn main() -> Result<()> {
                                 .collect()
                         };
 
+                        let current_epoch = current_block / 360;
                         for challenge_id in challenges {
                             let challenge_id_str = challenge_id.to_string();
                             let module_path = format!("{}.wasm", challenge_id_str);
 
                             if let Some(ref executor) = wasm_executor {
-                                match executor.execute_sync(&module_path) {
+                                match executor.execute_sync_with_block(&module_path, current_block, current_epoch) {
                                     Ok(sync_result) => {
                                         info!(
                                             challenge_id = %challenge_id,
@@ -3163,8 +3170,10 @@ async fn handle_block_event(
                 let challenges: Vec<String> = state_manager
                     .apply(|state| state.challenges.keys().map(|k| k.to_string()).collect());
                 let local_hotkey = keypair.hotkey();
+                let block_height = state_manager.apply(|state| state.bittensor_block);
+                let epoch = block_height / 360;
                 for cid in &challenges {
-                    match executor.execute_get_weights(cid) {
+                    match executor.execute_get_weights_with_block(cid, block_height, epoch) {
                         Ok(assignments) if !assignments.is_empty() => {
                             // Read emission_weight from chain state
                             let emission_weight = {

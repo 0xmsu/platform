@@ -916,6 +916,16 @@ impl WasmChallengeExecutor {
         &self,
         module_path: &str,
     ) -> Result<Vec<platform_challenge_sdk::WeightAssignment>> {
+        self.execute_get_weights_with_block(module_path, 0, 0)
+    }
+
+    /// Execute get_weights on a WASM challenge module with block context.
+    pub fn execute_get_weights_with_block(
+        &self,
+        module_path: &str,
+        block_height: u64,
+        epoch: u64,
+    ) -> Result<Vec<platform_challenge_sdk::WeightAssignment>> {
         let start = Instant::now();
 
         let module = self
@@ -932,6 +942,8 @@ impl WasmChallengeExecutor {
             },
             storage_backend: Arc::clone(&self.config.storage_backend),
             consensus_policy: ConsensusPolicy::read_only(),
+            block_height,
+            epoch,
             ..Default::default()
         };
 
@@ -991,6 +1003,17 @@ impl WasmChallengeExecutor {
         &self,
         module_path: &str,
     ) -> Result<platform_challenge_sdk_wasm::WasmSyncResult> {
+        self.execute_sync_with_block(module_path, 0, 0)
+    }
+
+    /// Execute sync on a WASM challenge module with block context.
+    /// Returns WasmSyncResult with leaderboard hash and stats for consensus.
+    pub fn execute_sync_with_block(
+        &self,
+        module_path: &str,
+        block_height: u64,
+        epoch: u64,
+    ) -> Result<platform_challenge_sdk_wasm::WasmSyncResult> {
         let start = Instant::now();
 
         let module = self
@@ -1007,6 +1030,8 @@ impl WasmChallengeExecutor {
             },
             storage_backend: Arc::clone(&self.config.storage_backend),
             consensus_policy: ConsensusPolicy::read_only(),
+            block_height,
+            epoch,
             ..Default::default()
         };
 

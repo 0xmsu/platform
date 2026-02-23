@@ -597,14 +597,22 @@ impl DistributedStore for LocalStorage {
             stored_value.metadata.ttl_seconds = options.ttl_seconds;
         }
 
-        // Create entry with replication info (no block_id for regular put)
+        // Update metadata with block tracking if provided
+        if let Some(block_id) = options.block_id {
+            if stored_value.metadata.created_block == 0 {
+                stored_value.metadata.created_block = block_id;
+            }
+            stored_value.metadata.updated_block = block_id;
+        }
+
+        // Create entry with replication info and optional block_id
         let entry = LocalEntry {
             value: stored_value.clone(),
             replication: ReplicationInfo {
                 needs_replication: !options.local_only,
                 ..Default::default()
             },
-            block_id: None,
+            block_id: options.block_id,
         };
 
         self.put_entry(&key, &entry)?;

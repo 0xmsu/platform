@@ -238,6 +238,18 @@ pub struct PutOptions {
     pub ttl_seconds: u64,
     /// Expected version for optimistic concurrency (None = ignore)
     pub expected_version: Option<u64>,
+    /// Block number for tracking when this write occurred
+    pub block_id: Option<u64>,
+}
+
+impl PutOptions {
+    /// Create options with a specific block ID for tracking
+    pub fn with_block(block_id: u64) -> Self {
+        Self {
+            block_id: Some(block_id),
+            ..Default::default()
+        }
+    }
 }
 
 /// Result of a list operation
