@@ -933,10 +933,14 @@ async fn main() -> Result<()> {
     let mut stale_job_interval = tokio::time::interval(Duration::from_secs(120));
     let mut weight_check_interval = tokio::time::interval(Duration::from_secs(30));
     let mut last_weight_submission_epoch: u64 = 0; // Local tracking of weight submissions
-    let mut challenge_sync_interval = tokio::time::interval(Duration::from_secs(60)); // Check every minute
-    let mut last_sync_block: u64 = 0; // Last block where sync was triggered
-    let sync_block_interval: u64 = 60; // Sync every 60 blocks
-    let mut storage_stats_interval = tokio::time::interval(Duration::from_secs(300)); // Log stats every 5 min
+    let mut challenge_sync_interval = tokio::time::interval(Duration::from_secs(30)); // Check every 30s
+    let mut last_sync_block: u64 = 0;
+    let sync_block_interval: u64 = 30; // Sync every 30 blocks (~3 min)
+    let mut storage_stats_interval = tokio::time::interval(Duration::from_secs(300));
+    // Track last synced block per challenge for delta sync
+    let challenge_last_sync: Arc<
+        RwLock<std::collections::HashMap<platform_core::ChallengeId, u64>>,
+    > = Arc::new(RwLock::new(std::collections::HashMap::new()));
 
     // Clone p2p_cmd_tx for use in the loop
     let p2p_broadcast_tx = p2p_cmd_tx.clone();
@@ -955,6 +959,7 @@ async fn main() -> Result<()> {
                     &keypair,
                     &p2p_cmd_tx,
                     &chain_state,
+                    &challenge_last_sync,
                 ).await;
             }
 
@@ -1837,6 +1842,7 @@ async fn handle_network_event(
     keypair: &Keypair,
     p2p_cmd_tx: &tokio::sync::mpsc::Sender<platform_p2p_consensus::P2PCommand>,
     chain_state: &Arc<RwLock<platform_core::ChainState>>,
+    challenge_last_sync: &Arc<RwLock<std::collections::HashMap<platform_core::ChallengeId, u64>>>,
 ) {
     match event {
         NetworkEvent::Message { source, message } => match message {
@@ -2692,7 +2698,7 @@ async fn handle_network_event(
                                     .put(
                                         storage_key.clone(),
                                         proposal.value.clone(),
-                                        PutOptions::default(),
+                                        put_options_with_block(state_manager),
                                     )
                                     .await
                                     .map(|_| true)
@@ -3142,20 +3148,31 @@ async fn handle_network_event(
                 };
 
                 if our_hash != [0u8; 32] && our_hash == proposal.sync_result_hash {
+                    // In sync -- update last_sync_block
+                    challenge_last_sync
+                        .write()
+                        .insert(proposal.challenge_id, proposal.block_number);
                     debug!(
                         challenge_id = %proposal.challenge_id,
                         "Sync hash matches peer, storage is in sync"
                     );
                 } else if proposal.sync_result_hash != [0u8; 32] {
+                    // Delta sync: only request entries since our last known good block
+                    let since_block = challenge_last_sync
+                        .read()
+                        .get(&proposal.challenge_id)
+                        .copied()
+                        .unwrap_or(0);
+
                     info!(
                         challenge_id = %proposal.challenge_id,
                         proposer = %proposal.proposer.to_ss58(),
                         our_hash = %hex::encode(&our_hash[..8]),
                         peer_hash = %hex::encode(&proposal.sync_result_hash[..8]),
-                        "Sync hash divergence detected, requesting storage sync"
+                        since_block = since_block,
+                        "Sync hash divergence, requesting delta sync"
                     );
 
-                    // Request storage data from the proposer
                     let timestamp = chrono::Utc::now().timestamp_millis();
                     let sign_data =
                         bincode::serialize(&(&proposal.challenge_id, &our_hash, timestamp))
@@ -3167,6 +3184,7 @@ async fn handle_network_event(
                             challenge_id: proposal.challenge_id,
                             requester: keypair.hotkey(),
                             current_hash: our_hash,
+                            since_block,
                             timestamp,
                             signature,
                         },
@@ -3192,26 +3210,45 @@ async fn handle_network_event(
                     warn!(requester = %req.requester.to_ss58(), "Storage sync request from non-validator");
                 } else {
                     let challenge_ns = req.challenge_id.to_string();
+                    let since = req.since_block;
                     info!(
                         challenge_id = %req.challenge_id,
                         requester = %req.requester.to_ss58(),
-                        "Responding to storage sync request"
+                        since_block = since,
+                        "Responding to storage sync request (delta)"
                     );
 
-                    // Read all keys in this challenge namespace
-                    match storage.list_prefix(&challenge_ns, None, 10_000, None).await {
-                        Ok(list_result) => {
-                            let entries: Vec<platform_p2p_consensus::StorageSyncEntry> =
-                                list_result
-                                    .items
-                                    .iter()
-                                    .map(|(key, value)| platform_p2p_consensus::StorageSyncEntry {
-                                        namespace: key.namespace.clone(),
-                                        key: key.key.clone(),
-                                        value: value.data.clone(),
-                                        version: value.metadata.version,
-                                    })
-                                    .collect();
+                    // Collect items: if since_block > 0, delta only
+                    let items_result: Result<
+                        Vec<(
+                            platform_distributed_storage::StorageKey,
+                            platform_distributed_storage::StoredValue,
+                        )>,
+                        _,
+                    > = if since > 0 {
+                        storage
+                            .list_after_block(&challenge_ns, since, 10_000)
+                            .await
+                            .map(|qr| qr.items)
+                    } else {
+                        storage
+                            .list_prefix(&challenge_ns, None, 10_000, None)
+                            .await
+                            .map(|lr| lr.items)
+                    };
+
+                    match items_result {
+                        Ok(items) => {
+                            let entries: Vec<platform_p2p_consensus::StorageSyncEntry> = items
+                                .iter()
+                                .map(|(key, value)| platform_p2p_consensus::StorageSyncEntry {
+                                    namespace: key.namespace.clone(),
+                                    key: key.key.clone(),
+                                    value: value.data.clone(),
+                                    version: value.metadata.version,
+                                    updated_block: value.metadata.updated_block,
+                                })
+                                .collect();
 
                             let total = entries.len() as u64;
 
@@ -3254,7 +3291,8 @@ async fn handle_network_event(
                                 info!(
                                     challenge_id = %req.challenge_id,
                                     entries = total,
-                                    "Storage sync response sent"
+                                    since_block = since,
+                                    "Storage sync delta response sent"
                                 );
                             }
                         }
@@ -3286,6 +3324,7 @@ async fn handle_network_event(
 
                     let mut applied = 0u64;
                     let mut skipped = 0u64;
+                    let mut max_block = 0u64;
                     let opts = put_options_with_block(state_manager);
 
                     for entry in &resp.entries {
@@ -3306,16 +3345,27 @@ async fn handle_network_event(
                                     warn!(error = %e, "Failed to apply synced entry");
                                 } else {
                                     applied += 1;
+                                    if entry.updated_block > max_block {
+                                        max_block = entry.updated_block;
+                                    }
                                 }
                             }
                         }
+                    }
+
+                    // Update last_sync_block for this challenge
+                    if max_block > 0 {
+                        challenge_last_sync
+                            .write()
+                            .insert(resp.challenge_id, max_block);
                     }
 
                     info!(
                         challenge_id = %resp.challenge_id,
                         applied = applied,
                         skipped = skipped,
-                        "Storage sync complete"
+                        max_block = max_block,
+                        "Storage delta sync complete"
                     );
                 }
             }

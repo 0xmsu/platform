@@ -1042,6 +1042,9 @@ pub struct StorageSyncRequestMessage {
     pub requester: Hotkey,
     /// Our current hash for this namespace (so responder can skip if identical)
     pub current_hash: [u8; 32],
+    /// Only send entries updated after this block (0 = full sync)
+    #[serde(default)]
+    pub since_block: u64,
     /// Timestamp
     pub timestamp: i64,
     /// Signature
@@ -1058,6 +1061,9 @@ pub struct StorageSyncEntry {
     pub value: Vec<u8>,
     /// Metadata version
     pub version: u64,
+    /// Block at which this entry was last updated
+    #[serde(default)]
+    pub updated_block: u64,
 }
 
 /// Response with storage data for a challenge namespace

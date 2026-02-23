@@ -39,6 +39,8 @@ pub const HOST_STORAGE_DELETE: &str = "storage_delete";
 pub const HOST_STORAGE_GET_CROSS: &str = "storage_get_cross";
 pub const HOST_STORAGE_GET_RESULT: &str = "storage_get_result";
 pub const HOST_STORAGE_ALLOC: &str = "storage_alloc";
+pub const HOST_STORAGE_LIST_PREFIX: &str = "storage_list_prefix";
+pub const HOST_STORAGE_COUNT_PREFIX: &str = "storage_count_prefix";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -296,6 +298,23 @@ pub trait StorageBackend: Send + Sync {
     ) -> Result<Option<Vec<u8>>, StorageHostError> {
         self.get(challenge_id, key)
     }
+
+    /// List keys matching a prefix. Returns serialized Vec<(key, value)> pairs.
+    fn list_prefix(
+        &self,
+        challenge_id: &str,
+        prefix: &[u8],
+        limit: u32,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageHostError> {
+        let _ = (challenge_id, prefix, limit);
+        Ok(Vec::new())
+    }
+
+    /// Count keys matching a prefix.
+    fn count_prefix(&self, challenge_id: &str, prefix: &[u8]) -> Result<u64, StorageHostError> {
+        let _ = (challenge_id, prefix);
+        Ok(0)
+    }
 }
 
 pub struct NoopStorageBackend;
@@ -512,6 +531,37 @@ impl HostFunctionRegistrar for StorageHostFunctions {
                         value_ptr,
                         value_len,
                     )
+                },
+            )
+            .map_err(|err| WasmRuntimeError::HostFunction(err.to_string()))?;
+
+        linker
+            .func_wrap(
+                HOST_STORAGE_NAMESPACE,
+                HOST_STORAGE_LIST_PREFIX,
+                |mut caller: Caller<RuntimeState>,
+                 prefix_ptr: i32,
+                 prefix_len: i32,
+                 result_ptr: i32,
+                 limit: i32|
+                 -> i32 {
+                    handle_storage_list_prefix(
+                        &mut caller,
+                        prefix_ptr,
+                        prefix_len,
+                        result_ptr,
+                        limit,
+                    )
+                },
+            )
+            .map_err(|err| WasmRuntimeError::HostFunction(err.to_string()))?;
+
+        linker
+            .func_wrap(
+                HOST_STORAGE_NAMESPACE,
+                HOST_STORAGE_COUNT_PREFIX,
+                |mut caller: Caller<RuntimeState>, prefix_ptr: i32, prefix_len: i32| -> i64 {
+                    handle_storage_count_prefix(&mut caller, prefix_ptr, prefix_len)
                 },
             )
             .map_err(|err| WasmRuntimeError::HostFunction(err.to_string()))?;
@@ -810,6 +860,80 @@ fn write_wasm_memory(
     }
     data[ptr..end].copy_from_slice(bytes);
     Ok(())
+}
+
+fn handle_storage_list_prefix(
+    caller: &mut Caller<RuntimeState>,
+    prefix_ptr: i32,
+    prefix_len: i32,
+    result_ptr: i32,
+    limit: i32,
+) -> i32 {
+    let prefix = match read_wasm_memory(caller, prefix_ptr, prefix_len) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            warn!(error = %err, "storage_list_prefix: failed to read prefix");
+            return StorageHostStatus::InternalError.to_i32();
+        }
+    };
+
+    let storage = &caller.data().storage_state;
+    let challenge_id = storage.challenge_id.clone();
+    let backend = Arc::clone(&storage.backend);
+    let limit = if limit <= 0 { 1000 } else { limit as u32 };
+
+    let items = match backend.list_prefix(&challenge_id, &prefix, limit) {
+        Ok(items) => items,
+        Err(err) => {
+            warn!(error = %err, "storage_list_prefix: backend list failed");
+            return StorageHostStatus::from(err).to_i32();
+        }
+    };
+
+    // Serialize as bincode: Vec<(Vec<u8>, Vec<u8>)>
+    let data = match bincode::serialize(&items) {
+        Ok(d) => d,
+        Err(err) => {
+            warn!(error = %err, "storage_list_prefix: serialization failed");
+            return StorageHostStatus::InternalError.to_i32();
+        }
+    };
+
+    caller.data_mut().storage_state.bytes_read += data.len() as u64;
+    caller.data_mut().storage_state.operations_count += 1;
+
+    if let Err(err) = write_wasm_memory(caller, result_ptr, &data) {
+        warn!(error = %err, "storage_list_prefix: failed to write result");
+        return StorageHostStatus::InternalError.to_i32();
+    }
+
+    data.len() as i32
+}
+
+fn handle_storage_count_prefix(
+    caller: &mut Caller<RuntimeState>,
+    prefix_ptr: i32,
+    prefix_len: i32,
+) -> i64 {
+    let prefix = match read_wasm_memory(caller, prefix_ptr, prefix_len) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            warn!(error = %err, "storage_count_prefix: failed to read prefix");
+            return -1;
+        }
+    };
+
+    let storage = &caller.data().storage_state;
+    let challenge_id = storage.challenge_id.clone();
+    let backend = Arc::clone(&storage.backend);
+
+    match backend.count_prefix(&challenge_id, &prefix) {
+        Ok(count) => count as i64,
+        Err(err) => {
+            warn!(error = %err, "storage_count_prefix: backend count failed");
+            -1
+        }
+    }
 }
 
 fn get_memory(caller: &mut Caller<RuntimeState>) -> Option<Memory> {

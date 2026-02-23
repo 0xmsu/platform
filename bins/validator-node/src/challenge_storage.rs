@@ -166,4 +166,49 @@ impl StorageBackend for ChallengeStorageBackend {
         .map_err(|e| StorageHostError::StorageError(e.to_string()))?;
         Ok(result.map(|v| v.data))
     }
+
+    fn list_prefix(
+        &self,
+        challenge_id: &str,
+        prefix: &[u8],
+        limit: u32,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageHostError> {
+        let prefix_bytes = if prefix.is_empty() {
+            None
+        } else {
+            Some(prefix)
+        };
+
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.storage.list_prefix(
+                challenge_id,
+                prefix_bytes,
+                limit as usize,
+                None,
+            ))
+        })
+        .map_err(|e| StorageHostError::StorageError(e.to_string()))?;
+
+        // Convert StorageKey back to the raw key bytes the WASM expects.
+        // The key stored in DStorageKey is hex-encoded, so decode it back.
+        let items: Vec<(Vec<u8>, Vec<u8>)> = result
+            .items
+            .into_iter()
+            .map(|(storage_key, stored_value)| {
+                let raw_key = hex::decode(storage_key.key_string().unwrap_or_default())
+                    .unwrap_or_else(|_| storage_key.key.clone());
+                (raw_key, stored_value.data)
+            })
+            .collect();
+
+        Ok(items)
+    }
+
+    fn count_prefix(&self, challenge_id: &str, _prefix: &[u8]) -> Result<u64, StorageHostError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.storage.count_by_namespace(challenge_id))
+        })
+        .map_err(|e| StorageHostError::StorageError(e.to_string()))
+    }
 }

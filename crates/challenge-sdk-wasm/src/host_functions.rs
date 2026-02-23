@@ -23,6 +23,8 @@ extern "C" {
         key_len: i32,
         value_ptr: i32,
     ) -> i32;
+    fn storage_list_prefix(prefix_ptr: i32, prefix_len: i32, result_ptr: i32, limit: i32) -> i32;
+    fn storage_count_prefix(prefix_ptr: i32, prefix_len: i32) -> i64;
 }
 
 #[link(wasm_import_module = "platform_terminal")]
@@ -133,6 +135,33 @@ pub fn host_storage_get_cross(challenge_id: &[u8], key: &[u8]) -> Result<Vec<u8>
     }
     value_buf.truncate(status as usize);
     Ok(value_buf)
+}
+
+/// List all key-value pairs matching a prefix. Returns bincode-encoded Vec<(Vec<u8>, Vec<u8>)>.
+pub fn host_storage_list_prefix(prefix: &[u8], limit: i32) -> Result<Vec<u8>, i32> {
+    let mut result_buf = vec![0u8; RESPONSE_BUF_LARGE];
+    let status = unsafe {
+        storage_list_prefix(
+            prefix.as_ptr() as i32,
+            prefix.len() as i32,
+            result_buf.as_mut_ptr() as i32,
+            limit,
+        )
+    };
+    if status < 0 {
+        return Err(status);
+    }
+    result_buf.truncate(status as usize);
+    Ok(result_buf)
+}
+
+/// Count keys matching a prefix.
+pub fn host_storage_count_prefix(prefix: &[u8]) -> Result<u64, i32> {
+    let count = unsafe { storage_count_prefix(prefix.as_ptr() as i32, prefix.len() as i32) };
+    if count < 0 {
+        return Err(count as i32);
+    }
+    Ok(count as u64)
 }
 
 pub fn host_terminal_exec(request: &[u8]) -> Result<Vec<u8>, i32> {
