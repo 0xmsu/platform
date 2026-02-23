@@ -11,7 +11,7 @@ use sled::{Db, Tree};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 /// Maximum size for deserializing storage entries (100MB).
 /// This limit prevents DoS attacks from malformed data causing excessive memory allocation.
@@ -159,19 +159,34 @@ impl LocalStorage {
         key.to_bytes()
     }
 
-    /// Get a raw entry from the database
+    /// Get a raw entry from the database.
+    /// Gracefully handles legacy entries that were serialized before new fields were added
+    /// (bincode does not support #[serde(default)] for missing fields).
     fn get_entry(&self, key: &StorageKey) -> StorageResult<Option<LocalEntry>> {
         let db_key = Self::db_key(key);
 
         match self.data_tree.get(&db_key)? {
             Some(bytes) => {
-                // Use options compatible with bincode::serialize (legacy format with fixint encoding)
-                let entry: LocalEntry = bincode::options()
+                match bincode::options()
                     .with_limit(MAX_ENTRY_SIZE)
                     .with_fixint_encoding()
                     .allow_trailing_bytes()
-                    .deserialize(&bytes)?;
-                Ok(Some(entry))
+                    .deserialize::<LocalEntry>(&bytes)
+                {
+                    Ok(entry) => Ok(Some(entry)),
+                    Err(e) => {
+                        // Legacy data written before new fields were added to
+                        // ValueMetadata/LocalEntry cannot be deserialized by bincode.
+                        // Treat as missing so the caller re-creates the entry with the
+                        // current schema. The raw data in sled is kept until overwritten.
+                        warn!(
+                            key = %key,
+                            error = %e,
+                            "Failed to deserialize entry (legacy format?), treating as missing"
+                        );
+                        Ok(None)
+                    }
+                }
             }
             None => Ok(None),
         }
@@ -270,12 +285,15 @@ impl LocalStorage {
         for result in self.data_tree.iter() {
             let (key_bytes, value_bytes) = result?;
 
-            // Use options compatible with bincode::serialize (legacy format with fixint encoding)
-            let entry: LocalEntry = bincode::options()
+            let entry: LocalEntry = match bincode::options()
                 .with_limit(MAX_ENTRY_SIZE)
                 .with_fixint_encoding()
                 .allow_trailing_bytes()
-                .deserialize(&value_bytes)?;
+                .deserialize(&value_bytes)
+            {
+                Ok(e) => e,
+                Err(_) => continue, // Skip legacy entries
+            };
 
             if entry.replication.needs_replication {
                 // Parse the key back into a StorageKey
@@ -481,12 +499,15 @@ impl LocalStorage {
 
             // Get the actual data
             if let Some(value_bytes) = self.data_tree.get(&data_key_bytes)? {
-                // Use options compatible with bincode::serialize (legacy format with fixint encoding)
-                let entry: LocalEntry = bincode::options()
+                let entry: LocalEntry = match bincode::options()
                     .with_limit(MAX_ENTRY_SIZE)
                     .with_fixint_encoding()
                     .allow_trailing_bytes()
-                    .deserialize(&value_bytes)?;
+                    .deserialize(&value_bytes)
+                {
+                    Ok(e) => e,
+                    Err(_) => continue, // Skip legacy entries
+                };
 
                 // Skip expired entries
                 if entry.value.metadata.is_expired() {
@@ -676,12 +697,15 @@ impl DistributedStore for LocalStorage {
 
             // Get the actual data
             if let Some(value_bytes) = self.data_tree.get(&data_key)? {
-                // Use options compatible with bincode::serialize (legacy format with fixint encoding)
-                let entry: LocalEntry = bincode::options()
+                let entry: LocalEntry = match bincode::options()
                     .with_limit(MAX_ENTRY_SIZE)
                     .with_fixint_encoding()
                     .allow_trailing_bytes()
-                    .deserialize(&value_bytes)?;
+                    .deserialize(&value_bytes)
+                {
+                    Ok(e) => e,
+                    Err(_) => continue, // Skip legacy entries
+                };
 
                 // Skip expired entries
                 if entry.value.metadata.is_expired() {
