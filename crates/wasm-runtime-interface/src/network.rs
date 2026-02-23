@@ -275,11 +275,19 @@ impl NetworkState {
             builder = builder.body(request.body.clone());
         }
 
-        let response = builder.send().map_err(map_reqwest_error)?;
-        let status = response.status().as_u16();
-        let headers = collect_headers(response.headers())?;
-
-        let body = read_response_body(response, self.policy.limits.max_response_bytes)?;
+        // Execute HTTP request in a dedicated thread to avoid
+        // "Cannot start a runtime from within a runtime" panic when
+        // reqwest::blocking internally calls block_on for DNS resolution.
+        let max_response_bytes = self.policy.limits.max_response_bytes;
+        let (status, headers, body) = std::thread::spawn(move || {
+            let response = builder.send().map_err(map_reqwest_error)?;
+            let status = response.status().as_u16();
+            let headers = collect_headers(response.headers())?;
+            let body = read_response_body(response, max_response_bytes)?;
+            Ok::<_, NetworkError>((status, headers, body))
+        })
+        .join()
+        .map_err(|_| NetworkError::HttpFailure("HTTP thread panicked".to_string()))??;
 
         self.ensure_header_limits(&headers)?;
 
