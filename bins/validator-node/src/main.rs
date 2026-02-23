@@ -2297,16 +2297,32 @@ async fn handle_network_event(
                                 hex::encode(&proposal.key),
                             );
 
-                            match storage
-                                .put(storage_key, proposal.value.clone(), PutOptions::default())
-                                .await
-                            {
+                            // Empty value means delete
+                            let result = if proposal.value.is_empty() {
+                                storage.delete(&storage_key).await
+                            } else {
+                                storage
+                                    .put(
+                                        storage_key.clone(),
+                                        proposal.value.clone(),
+                                        PutOptions::default(),
+                                    )
+                                    .await
+                                    .map(|_| true)
+                            };
+
+                            match result {
                                 Ok(_) => {
+                                    let op = if proposal.value.is_empty() {
+                                        "deleted"
+                                    } else {
+                                        "written"
+                                    };
                                     info!(
                                         proposal_id = %hex::encode(&proposal.proposal_id[..8]),
                                         challenge_id = %proposal.challenge_id,
                                         key_len = proposal.key.len(),
-                                        "Storage proposal consensus reached, data written"
+                                        "Storage proposal consensus reached, data {}", op
                                     );
                                 }
                                 Err(e) => {

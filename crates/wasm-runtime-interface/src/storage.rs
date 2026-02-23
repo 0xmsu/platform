@@ -596,14 +596,12 @@ fn handle_storage_set(
         return StorageHostStatus::from(err).to_i32();
     }
 
-    if storage.config.require_consensus && !storage.config.allow_direct_writes {
-        warn!("storage_set: consensus required but direct writes disabled");
-        return StorageHostStatus::ConsensusRequired.to_i32();
-    }
-
     let challenge_id = storage.challenge_id.clone();
     let backend = Arc::clone(&storage.backend);
 
+    // When allow_direct_writes=false, propose_write broadcasts via P2P for consensus.
+    // The actual write happens in the StorageVote handler after 2f+1 approval.
+    // When allow_direct_writes=true, propose_write writes directly (for testing).
     match backend.propose_write(&challenge_id, &key, &value) {
         Ok(_proposal_id) => {
             caller.data_mut().storage_state.bytes_written += value.len() as u64;
@@ -632,21 +630,18 @@ fn handle_storage_delete(caller: &mut Caller<RuntimeState>, key_ptr: i32, key_le
         return StorageHostStatus::from(err).to_i32();
     }
 
-    if storage.config.require_consensus && !storage.config.allow_direct_writes {
-        warn!("storage_delete: direct deletes require consensus or allow_direct_writes");
-        return StorageHostStatus::ConsensusRequired.to_i32();
-    }
-
     let challenge_id = storage.challenge_id.clone();
     let backend = Arc::clone(&storage.backend);
 
-    match backend.delete(&challenge_id, &key) {
-        Ok(_deleted) => {
+    // Delete goes through consensus by proposing a write with empty value
+    // The StorageVote handler will interpret empty value as delete
+    match backend.propose_write(&challenge_id, &key, &[]) {
+        Ok(_proposal_id) => {
             caller.data_mut().storage_state.operations_count += 1;
             StorageHostStatus::Success.to_i32()
         }
         Err(err) => {
-            warn!(error = %err, "storage_delete: backend delete failed");
+            warn!(error = %err, "storage_delete: backend propose failed");
             StorageHostStatus::from(err).to_i32()
         }
     }
