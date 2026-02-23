@@ -291,10 +291,9 @@ fn test_sudo_action_serialization_roundtrip() {
             reason: "Test pause".to_string(),
         },
         SudoAction::Resume,
-        SudoAction::SetChallengeWeight {
+        SudoAction::SetEmission {
             challenge_id: ChallengeId::new(),
-            mechanism_id: 1,
-            weight_ratio: 0.5,
+            emission_weight: 0.5,
         },
     ];
 
@@ -313,19 +312,16 @@ fn test_sudo_action_serialization_roundtrip() {
             ) => assert_eq!(r1, r2),
             (SudoAction::Resume, SudoAction::Resume) => {}
             (
-                SudoAction::SetChallengeWeight {
+                SudoAction::SetEmission {
                     challenge_id: c1,
-                    mechanism_id: m1,
-                    weight_ratio: w1,
+                    emission_weight: w1,
                 },
-                SudoAction::SetChallengeWeight {
+                SudoAction::SetEmission {
                     challenge_id: c2,
-                    mechanism_id: m2,
-                    weight_ratio: w2,
+                    emission_weight: w2,
                 },
             ) => {
                 assert_eq!(c1, c2);
-                assert_eq!(m1, m2);
                 assert_eq!(w1, w2);
             }
             _ => panic!("Serialization roundtrip produced different variant"),
@@ -367,18 +363,9 @@ fn test_all_sudo_action_variants_can_be_signed() {
         SudoAction::UpdateConfig {
             config: NetworkConfig::default(),
         },
-        SudoAction::SetChallengeWeight {
+        SudoAction::SetEmission {
             challenge_id: ChallengeId::new(),
-            mechanism_id: 0,
-            weight_ratio: 0.5,
-        },
-        SudoAction::SetMechanismBurnRate {
-            mechanism_id: 0,
-            burn_rate: 0.1,
-        },
-        SudoAction::SetMechanismConfig {
-            mechanism_id: 0,
-            config: platform_core::MechanismWeightConfig::new(0),
+            emission_weight: 0.5,
         },
         SudoAction::SetRequiredVersion {
             min_version: "0.1.0".to_string(),
@@ -472,45 +459,23 @@ fn test_force_state_update_action() {
 // ============================================================================
 
 #[test]
-fn test_set_challenge_weight_action() {
+fn test_set_emission_action() {
     let challenge_id = ChallengeId::new();
 
-    let action = SudoAction::SetChallengeWeight {
+    let action = SudoAction::SetEmission {
         challenge_id,
-        mechanism_id: 0,
-        weight_ratio: 0.75,
+        emission_weight: 0.75,
     };
 
     match action {
-        SudoAction::SetChallengeWeight {
+        SudoAction::SetEmission {
             challenge_id: cid,
-            mechanism_id,
-            weight_ratio,
+            emission_weight,
         } => {
             assert_eq!(cid, challenge_id);
-            assert_eq!(mechanism_id, 0);
-            assert_eq!(weight_ratio, 0.75);
+            assert_eq!(emission_weight, 0.75);
         }
-        _ => panic!("Expected SetChallengeWeight"),
-    }
-}
-
-#[test]
-fn test_set_mechanism_burn_rate_action() {
-    let action = SudoAction::SetMechanismBurnRate {
-        mechanism_id: 1,
-        burn_rate: 0.15,
-    };
-
-    match action {
-        SudoAction::SetMechanismBurnRate {
-            mechanism_id,
-            burn_rate,
-        } => {
-            assert_eq!(mechanism_id, 1);
-            assert_eq!(burn_rate, 0.15);
-        }
-        _ => panic!("Expected SetMechanismBurnRate"),
+        _ => panic!("Expected SetEmission"),
     }
 }
 

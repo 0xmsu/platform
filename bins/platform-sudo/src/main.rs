@@ -62,41 +62,16 @@ enum Commands {
         #[arg(short, long)]
         name: String,
     },
-    /// Set challenge weight/emission ratio on a mechanism
+    /// Set a challenge's emission weight (0.0 - 1.0)
+    /// Raw weights from the challenge are scaled by this value.
+    /// Remaining (1.0 - weight) goes to UID 0 (burn).
     SetEmission {
-        /// Challenge ID (UUID)
+        /// Challenge ID (UUID or name)
         #[arg(short = 'c', long)]
         challenge_id: String,
-        /// Mechanism ID (default: 0)
-        #[arg(short, long, default_value = "0")]
-        mechanism_id: u8,
-        /// Weight ratio (0.0 - 1.0)
+        /// Emission weight (0.0 - 1.0)
         #[arg(short, long)]
         weight: f64,
-    },
-    /// Set mechanism burn rate
-    SetBurnRate {
-        /// Mechanism ID
-        #[arg(short, long, default_value = "0")]
-        mechanism_id: u8,
-        /// Burn rate (0.0 - 1.0), e.g., 0.1 = 10% to UID 0
-        #[arg(short, long)]
-        rate: f64,
-    },
-    /// Configure mechanism weight distribution
-    SetMechanismConfig {
-        /// Mechanism ID
-        #[arg(short, long, default_value = "0")]
-        mechanism_id: u8,
-        /// Burn rate (0.0 - 1.0)
-        #[arg(long, default_value = "0.0")]
-        burn_rate: f64,
-        /// Equal distribution among challenges
-        #[arg(long)]
-        equal_distribution: bool,
-        /// Minimum weight threshold
-        #[arg(long, default_value = "0.0001")]
-        min_weight: f64,
     },
     /// Emergency pause the network
     Pause {
@@ -540,45 +515,13 @@ async fn main() -> Result<()> {
         }
         Some(Commands::SetEmission {
             challenge_id,
-            mechanism_id,
             weight,
         }) => {
             let cid = ChallengeId::from_string(&challenge_id);
             let action = serde_json::json!({
-                "SetChallengeWeight": {
+                "SetEmission": {
                     "challenge_id": cid.0.to_string(),
-                    "mechanism_id": mechanism_id,
-                    "weight_ratio": weight
-                }
-            });
-            sudo_cli.send_sudo_action(action).await?;
-        }
-        Some(Commands::SetBurnRate { mechanism_id, rate }) => {
-            let action = serde_json::json!({
-                "SetMechanismBurnRate": {
-                    "mechanism_id": mechanism_id,
-                    "burn_rate": rate
-                }
-            });
-            sudo_cli.send_sudo_action(action).await?;
-        }
-        Some(Commands::SetMechanismConfig {
-            mechanism_id,
-            burn_rate,
-            equal_distribution,
-            min_weight,
-        }) => {
-            let action = serde_json::json!({
-                "SetMechanismConfig": {
-                    "mechanism_id": mechanism_id,
-                    "config": {
-                        "mechanism_id": mechanism_id,
-                        "base_burn_rate": burn_rate,
-                        "equal_distribution": equal_distribution,
-                        "min_weight_threshold": min_weight,
-                        "max_weight_cap": 1.0,
-                        "active": true
-                    }
+                    "emission_weight": weight
                 }
             });
             sudo_cli.send_sudo_action(action).await?;

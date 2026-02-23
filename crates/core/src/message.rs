@@ -278,29 +278,14 @@ pub enum SudoAction {
     /// Update network configuration
     UpdateConfig { config: NetworkConfig },
 
-    // === Weight Allocation ===
-    /// Set challenge weight ratio on a mechanism (0.0 - 1.0)
-    /// Remaining weight goes to UID 0 (burn) unless other challenges share the mechanism
-    SetChallengeWeight {
+    // === Emission ===
+    /// Set a challenge's emission weight (0.0 - 1.0)
+    /// The challenge's raw weights are scaled by this value.
+    /// Remaining weight (1.0 - emission_weight) goes to UID 0 (burn).
+    SetEmission {
         challenge_id: ChallengeId,
-        mechanism_id: u8,
-        /// Weight ratio for this challenge (0.0 - 1.0)
-        /// If multiple challenges on same mechanism, ratios are normalized
-        weight_ratio: f64,
-    },
-
-    /// Set mechanism burn rate (weight that goes to UID 0)
-    /// Applied after challenge weights are distributed
-    SetMechanismBurnRate {
-        mechanism_id: u8,
-        /// Burn rate (0.0 - 1.0), e.g., 0.1 = 10% to UID 0
-        burn_rate: f64,
-    },
-
-    /// Configure mechanism weight distribution
-    SetMechanismConfig {
-        mechanism_id: u8,
-        config: MechanismWeightConfig,
+        /// Emission weight for this challenge (0.0 - 1.0)
+        emission_weight: f64,
     },
 
     // === Version Management ===

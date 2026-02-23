@@ -5,6 +5,7 @@ use crate::{
     MechanismWeightConfig, NetworkConfig, Result, Stake, SudoAction, ValidatorInfo,
     WasmChallengeConfig,
 };
+// Note: ChallengeWeightAllocation and MechanismWeightConfig kept for backward compat of existing fields
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -202,45 +203,27 @@ impl ChainState {
                 tracing::info!("Sudo: updating network config");
                 self.config = config.clone();
             }
-            SudoAction::SetChallengeWeight {
+            SudoAction::SetEmission {
                 challenge_id,
-                mechanism_id,
-                weight_ratio,
+                emission_weight,
             } => {
+                let clamped = emission_weight.clamp(0.0, 1.0);
                 tracing::info!(
                     challenge_id = %challenge_id,
-                    mechanism_id = mechanism_id,
-                    weight_ratio = weight_ratio,
-                    "Sudo: setting challenge weight"
+                    emission_weight = clamped,
+                    "Sudo: setting challenge emission weight"
                 );
-                let allocation =
-                    ChallengeWeightAllocation::new(*challenge_id, *mechanism_id, *weight_ratio);
-                self.challenge_weights.insert(*challenge_id, allocation);
-            }
-            SudoAction::SetMechanismBurnRate {
-                mechanism_id,
-                burn_rate,
-            } => {
-                tracing::info!(
-                    mechanism_id = mechanism_id,
-                    burn_rate = burn_rate,
-                    "Sudo: setting mechanism burn rate"
-                );
-                let config = self
-                    .mechanism_configs
-                    .entry(*mechanism_id)
-                    .or_insert_with(|| MechanismWeightConfig::new(*mechanism_id));
-                config.base_burn_rate = burn_rate.clamp(0.0, 1.0);
-            }
-            SudoAction::SetMechanismConfig {
-                mechanism_id,
-                config,
-            } => {
-                tracing::info!(
-                    mechanism_id = mechanism_id,
-                    "Sudo: setting mechanism config"
-                );
-                self.mechanism_configs.insert(*mechanism_id, config.clone());
+                // Update emission_weight on the challenge config
+                if let Some(wasm_config) = self.wasm_challenge_configs.get_mut(challenge_id) {
+                    wasm_config.config.emission_weight = clamped;
+                } else if let Some(challenge) = self.challenges.get_mut(challenge_id) {
+                    challenge.config.emission_weight = clamped;
+                } else {
+                    return Err(crate::MiniChainError::Consensus(format!(
+                        "Challenge {} not found",
+                        challenge_id
+                    )));
+                }
             }
             SudoAction::SetRequiredVersion {
                 min_version,
