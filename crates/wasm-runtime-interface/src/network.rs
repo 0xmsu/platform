@@ -160,7 +160,7 @@ pub struct NetworkState {
     policy: ValidatedNetworkPolicy,
     audit_logger: Option<Arc<dyn NetworkAuditLogger>>,
     http_client: Client,
-    dns_resolver: Resolver,
+    dns_resolver: Arc<Resolver>,
     dns_cache: HashMap<DnsCacheKey, DnsCacheEntry>,
     requests_made: u32,
     dns_lookups: u32,
@@ -215,7 +215,7 @@ impl NetworkState {
             let resolver = Resolver::new(ResolverConfig::default(), resolver_opts)
                 .map_err(|err| NetworkStateError::DnsResolver(err.to_string()))?;
 
-            Ok::<_, NetworkStateError>((client, resolver))
+            Ok::<_, NetworkStateError>((client, Arc::new(resolver)))
         })
         .join()
         .map_err(|_| {
@@ -278,7 +278,14 @@ impl NetworkState {
             method: request.method,
         });
 
-        let _resolved_ip = self.resolve_and_validate_ip(&request.url)?;
+        // Perform DNS resolution, IP validation, and the HTTP request in a
+        // dedicated thread.  All three operations can internally call
+        // `block_on` (trust-dns lookup, reqwest blocking send) which panics
+        // when executed inside a tokio runtime.
+        let dns_resolver = self.dns_resolver.clone();
+        let policy_ranges = self.policy.allowed_ip_ranges.clone();
+        let block_private = self.policy.dns_policy.block_private_ranges;
+        let url_clone = request.url.clone();
 
         let method = to_reqwest_method(request.method);
         let mut builder = self.http_client.request(method, &request.url);
@@ -289,11 +296,26 @@ impl NetworkState {
             builder = builder.body(request.body.clone());
         }
 
-        // Execute HTTP request in a dedicated thread to avoid
-        // "Cannot start a runtime from within a runtime" panic when
-        // reqwest::blocking internally calls block_on for DNS resolution.
         let max_response_bytes = self.policy.limits.max_response_bytes;
         let (status, headers, body) = std::thread::spawn(move || {
+            // DNS resolution + IP policy check
+            if let Some(host_str) = url::Url::parse(&url_clone)
+                .ok()
+                .and_then(|u| u.host_str().map(|s| s.to_string()))
+            {
+                if host_str.parse::<std::net::IpAddr>().is_err() {
+                    if let Ok(lookup) = dns_resolver.lookup_ip(host_str.as_str()) {
+                        for ip in lookup.iter().collect::<Vec<std::net::IpAddr>>() {
+                            if block_private && is_private_ip(ip) {
+                                return Err(NetworkError::PolicyViolation(format!(
+                                    "connection to private IP blocked: {ip}"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+
             let response = builder.send().map_err(map_reqwest_error)?;
             let status = response.status().as_u16();
             let headers = collect_headers(response.headers())?;
@@ -360,7 +382,12 @@ impl NetworkState {
             hostname: request.hostname.clone(),
         });
 
-        let records = resolve_dns(&self.dns_resolver, &request, &self.policy)?;
+        let resolver = Arc::clone(&self.dns_resolver);
+        let req_clone = request.clone();
+        let policy_clone = self.policy.clone();
+        let records = std::thread::spawn(move || resolve_dns(&resolver, &req_clone, &policy_clone))
+            .join()
+            .map_err(|_| NetworkError::DnsFailure("DNS resolve thread panicked".to_string()))??;
         if records.is_empty() {
             return Err(NetworkError::DnsFailure("no records returned".to_string()));
         }
@@ -458,15 +485,21 @@ impl NetworkState {
             return Ok(Some(ip));
         }
 
-        let lookup = self.dns_resolver.lookup_ip(host_str).map_err(|err| {
-            NetworkError::DnsFailure(format!("pre-connect resolve failed: {err}"))
-        })?;
+        let resolver = Arc::clone(&self.dns_resolver);
+        let host = host_str.to_string();
+        let lookup = std::thread::spawn(move || resolver.lookup_ip(host.as_str()))
+            .join()
+            .map_err(|_| NetworkError::DnsFailure("DNS lookup thread panicked".to_string()))?
+            .map_err(|err| {
+                NetworkError::DnsFailure(format!("pre-connect resolve failed: {err}"))
+            })?;
 
-        for ip in lookup.iter() {
-            self.validate_ip_against_policy(ip)?;
+        let ips: Vec<IpAddr> = lookup.iter().collect();
+        for ip in &ips {
+            self.validate_ip_against_policy(*ip)?;
         }
 
-        Ok(lookup.iter().next())
+        Ok(ips.into_iter().next())
     }
 
     fn validate_ip_against_policy(&self, ip: IpAddr) -> Result<(), NetworkError> {
