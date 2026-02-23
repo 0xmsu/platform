@@ -264,30 +264,19 @@ impl std::fmt::Debug for Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "info,validator_node=debug,platform_p2p_consensus=debug".into()
-            }),
-        )
-        .init();
-
     let args = Args::parse();
 
-    info!("Starting decentralized validator");
-    info!("SudoOwner: {}", SUDO_KEY_SS58);
-
-    // Load keypair
+    // Load keypair first to get hotkey for Sentry
     let keypair = load_keypair(&args)?;
     let validator_hotkey = keypair.ss58_address();
-    info!("Validator hotkey: {}", validator_hotkey);
 
-    // Initialize Sentry for error tracking with validator hotkey as identifier
+    // Initialize Sentry for error tracking (captures warn/error/panic)
     let _sentry_guard = sentry::init((
         "https://fb4324072ce6cfa8cb8a772ca37d1b19@o4510579978272768.ingest.us.sentry.io/4510934791094272",
         sentry::ClientOptions {
             release: sentry::release_name!(),
             send_default_pii: true,
+            traces_sample_rate: 0.1,
             ..Default::default()
         },
     ));
@@ -299,6 +288,30 @@ async fn main() -> Result<()> {
         }));
         scope.set_tag("validator_hotkey", &validator_hotkey);
     });
+
+    // Initialize tracing with Sentry layer to capture warn/error logs
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "info,validator_node=debug,platform_p2p_consensus=debug".into()
+            }),
+        ))
+        .with(sentry_tracing::layer().event_filter(|meta| {
+            // Send warn and error events to Sentry
+            match meta.level() {
+                &tracing::Level::ERROR | &tracing::Level::WARN => {
+                    sentry_tracing::EventFilter::Event
+                }
+                _ => sentry_tracing::EventFilter::Ignore,
+            }
+        }))
+        .init();
+
+    info!("Starting decentralized validator");
+    info!("SudoOwner: {}", SUDO_KEY_SS58);
+    info!("Validator hotkey: {}", validator_hotkey);
+    info!("Sentry initialized - errors and warnings will be reported");
 
     // Create data directory
     std::fs::create_dir_all(&args.data_dir)?;

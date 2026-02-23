@@ -53,4 +53,5 @@ sha2 = { workspace = true }
 rand = { workspace = true }
 
 # Error tracking
-sentry = "0.46"
+sentry = { version = "0.46", features = ["tracing"] }
+sentry-tracing = "0.46"
