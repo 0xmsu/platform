@@ -3552,8 +3552,14 @@ async fn handle_block_event(
             // Collect WASM-computed weights from challenges, convert hotkey->UID,
             // apply emission_weight, and submit
             if let Some(ref executor) = wasm_executor {
-                let challenges: Vec<String> = state_manager
-                    .apply(|state| state.challenges.keys().map(|k| k.to_string()).collect());
+                let challenges: Vec<String> = {
+                    let cs = chain_state.read();
+                    cs.wasm_challenge_configs
+                        .iter()
+                        .filter(|(_, cfg)| cfg.is_active)
+                        .map(|(id, _)| id.to_string())
+                        .collect()
+                };
                 let local_hotkey = keypair.hotkey();
                 let block_height = state_manager.apply(|state| state.bittensor_block);
                 let epoch = block_height / 360;
