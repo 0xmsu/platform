@@ -78,6 +78,11 @@ pub enum P2PMessage {
     ChallengeSyncProposal(ChallengeSyncProposalMessage),
     /// Vote on a challenge sync proposal
     ChallengeSyncVote(ChallengeSyncVoteMessage),
+
+    /// Request storage data for a challenge namespace
+    StorageSyncRequest(StorageSyncRequestMessage),
+    /// Response with storage data for a challenge namespace
+    StorageSyncResponse(StorageSyncResponseMessage),
 }
 
 impl P2PMessage {
@@ -140,6 +145,8 @@ impl P2PMessage {
             P2PMessage::CoreStateResponse(_) => "CoreStateResponse",
             P2PMessage::ChallengeSyncProposal(_) => "ChallengeSyncProposal",
             P2PMessage::ChallengeSyncVote(_) => "ChallengeSyncVote",
+            P2PMessage::StorageSyncRequest(_) => "StorageSyncRequest",
+            P2PMessage::StorageSyncResponse(_) => "StorageSyncResponse",
         }
     }
 }
@@ -1020,6 +1027,52 @@ pub struct ChallengeSyncVoteMessage {
     pub voter: Hotkey,
     /// Whether the voter agrees with the hash
     pub approve: bool,
+    /// Timestamp
+    pub timestamp: i64,
+    /// Signature
+    pub signature: Vec<u8>,
+}
+
+/// Request storage data for a specific challenge namespace
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StorageSyncRequestMessage {
+    /// Challenge namespace to sync
+    pub challenge_id: ChallengeId,
+    /// Requesting validator
+    pub requester: Hotkey,
+    /// Our current hash for this namespace (so responder can skip if identical)
+    pub current_hash: [u8; 32],
+    /// Timestamp
+    pub timestamp: i64,
+    /// Signature
+    pub signature: Vec<u8>,
+}
+
+/// Key-value entry for storage sync
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StorageSyncEntry {
+    /// Storage key (namespace:key)
+    pub namespace: String,
+    pub key: Vec<u8>,
+    /// Stored value
+    pub value: Vec<u8>,
+    /// Metadata version
+    pub version: u64,
+}
+
+/// Response with storage data for a challenge namespace
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StorageSyncResponseMessage {
+    /// Challenge namespace being synced
+    pub challenge_id: ChallengeId,
+    /// Responding validator
+    pub responder: Hotkey,
+    /// Hash of all data in this response
+    pub data_hash: [u8; 32],
+    /// Key-value entries
+    pub entries: Vec<StorageSyncEntry>,
+    /// Total entries in namespace (may be more than entries.len() if paginated)
+    pub total_entries: u64,
     /// Timestamp
     pub timestamp: i64,
     /// Signature

@@ -40,6 +40,7 @@ use platform_p2p_consensus::{
 };
 use platform_rpc::{RpcConfig, RpcServer};
 use platform_subnet_manager::BanList;
+use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -3126,19 +3127,197 @@ async fn handle_network_event(
                 }
             }
             P2PMessage::ChallengeSyncProposal(proposal) => {
-                info!(
-                    challenge_id = %proposal.challenge_id,
-                    block = proposal.block_number,
-                    proposer = %proposal.proposer.to_ss58(),
-                    "Received challenge sync proposal (consensus voting not yet implemented)"
-                );
+                let challenge_id_str = proposal.challenge_id.to_string();
+                let module_path = format!("{}.wasm", challenge_id_str);
+
+                // Compute our own sync hash to compare
+                let our_hash = if let Some(ref executor) = wasm_executor_ref {
+                    let block = state_manager.apply(|s| s.bittensor_block);
+                    match executor.execute_sync_with_block(&module_path, block, block / 360) {
+                        Ok(result) => result.leaderboard_hash,
+                        Err(_) => [0u8; 32],
+                    }
+                } else {
+                    [0u8; 32]
+                };
+
+                if our_hash != [0u8; 32] && our_hash == proposal.sync_result_hash {
+                    debug!(
+                        challenge_id = %proposal.challenge_id,
+                        "Sync hash matches peer, storage is in sync"
+                    );
+                } else if proposal.sync_result_hash != [0u8; 32] {
+                    info!(
+                        challenge_id = %proposal.challenge_id,
+                        proposer = %proposal.proposer.to_ss58(),
+                        our_hash = %hex::encode(&our_hash[..8]),
+                        peer_hash = %hex::encode(&proposal.sync_result_hash[..8]),
+                        "Sync hash divergence detected, requesting storage sync"
+                    );
+
+                    // Request storage data from the proposer
+                    let timestamp = chrono::Utc::now().timestamp_millis();
+                    let sign_data =
+                        bincode::serialize(&(&proposal.challenge_id, &our_hash, timestamp))
+                            .unwrap_or_default();
+                    let signature = keypair.sign_bytes(&sign_data).unwrap_or_default();
+
+                    let req = P2PMessage::StorageSyncRequest(
+                        platform_p2p_consensus::StorageSyncRequestMessage {
+                            challenge_id: proposal.challenge_id,
+                            requester: keypair.hotkey(),
+                            current_hash: our_hash,
+                            timestamp,
+                            signature,
+                        },
+                    );
+
+                    if let Err(e) = p2p_cmd_tx
+                        .send(platform_p2p_consensus::P2PCommand::Broadcast(req))
+                        .await
+                    {
+                        warn!(error = %e, "Failed to send storage sync request");
+                    }
+                }
             }
             P2PMessage::ChallengeSyncVote(vote) => {
                 debug!(
                     challenge_id = %vote.challenge_id,
                     voter = %vote.voter.to_ss58(),
-                    "Received challenge sync vote (consensus voting not yet implemented)"
+                    "Received challenge sync vote"
                 );
+            }
+            P2PMessage::StorageSyncRequest(req) => {
+                if !validator_set.is_validator(&req.requester) {
+                    warn!(requester = %req.requester.to_ss58(), "Storage sync request from non-validator");
+                } else {
+                    let challenge_ns = req.challenge_id.to_string();
+                    info!(
+                        challenge_id = %req.challenge_id,
+                        requester = %req.requester.to_ss58(),
+                        "Responding to storage sync request"
+                    );
+
+                    // Read all keys in this challenge namespace
+                    match storage.list_prefix(&challenge_ns, None, 10_000, None).await {
+                        Ok(list_result) => {
+                            let entries: Vec<platform_p2p_consensus::StorageSyncEntry> =
+                                list_result
+                                    .items
+                                    .iter()
+                                    .map(|(key, value)| platform_p2p_consensus::StorageSyncEntry {
+                                        namespace: key.namespace.clone(),
+                                        key: key.key.clone(),
+                                        value: value.data.clone(),
+                                        version: value.metadata.version,
+                                    })
+                                    .collect();
+
+                            let total = entries.len() as u64;
+
+                            // Compute hash of all entries for verification
+                            let mut hasher = sha2::Sha256::new();
+                            for e in &entries {
+                                sha2::Digest::update(&mut hasher, &e.key);
+                                sha2::Digest::update(&mut hasher, &e.value);
+                            }
+                            let data_hash: [u8; 32] = hasher.finalize().into();
+
+                            let timestamp = chrono::Utc::now().timestamp_millis();
+                            let sign_data = bincode::serialize(&(
+                                &req.challenge_id,
+                                &data_hash,
+                                total,
+                                timestamp,
+                            ))
+                            .unwrap_or_default();
+                            let signature = keypair.sign_bytes(&sign_data).unwrap_or_default();
+
+                            let resp = P2PMessage::StorageSyncResponse(
+                                platform_p2p_consensus::StorageSyncResponseMessage {
+                                    challenge_id: req.challenge_id,
+                                    responder: keypair.hotkey(),
+                                    data_hash,
+                                    entries,
+                                    total_entries: total,
+                                    timestamp,
+                                    signature,
+                                },
+                            );
+
+                            if let Err(e) = p2p_cmd_tx
+                                .send(platform_p2p_consensus::P2PCommand::Broadcast(resp))
+                                .await
+                            {
+                                warn!(error = %e, "Failed to send storage sync response");
+                            } else {
+                                info!(
+                                    challenge_id = %req.challenge_id,
+                                    entries = total,
+                                    "Storage sync response sent"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                challenge_id = %req.challenge_id,
+                                error = %e,
+                                "Failed to read storage for sync response"
+                            );
+                        }
+                    }
+                }
+            }
+            P2PMessage::StorageSyncResponse(resp) => {
+                if !validator_set.is_validator(&resp.responder) {
+                    warn!(responder = %resp.responder.to_ss58(), "Storage sync response from non-validator");
+                } else if resp.entries.is_empty() {
+                    debug!(
+                        challenge_id = %resp.challenge_id,
+                        "Empty storage sync response, nothing to apply"
+                    );
+                } else {
+                    info!(
+                        challenge_id = %resp.challenge_id,
+                        responder = %resp.responder.to_ss58(),
+                        entries = resp.entries.len(),
+                        "Applying storage sync from peer"
+                    );
+
+                    let mut applied = 0u64;
+                    let mut skipped = 0u64;
+                    let opts = put_options_with_block(state_manager);
+
+                    for entry in &resp.entries {
+                        let key = StorageKey::new(&entry.namespace, hex::encode(&entry.key));
+
+                        // Only apply if peer version is newer
+                        match storage
+                            .get(&key, platform_distributed_storage::GetOptions::default())
+                            .await
+                        {
+                            Ok(Some(existing)) if existing.metadata.version >= entry.version => {
+                                skipped += 1;
+                            }
+                            _ => {
+                                if let Err(e) =
+                                    storage.put(key, entry.value.clone(), opts.clone()).await
+                                {
+                                    warn!(error = %e, "Failed to apply synced entry");
+                                } else {
+                                    applied += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    info!(
+                        challenge_id = %resp.challenge_id,
+                        applied = applied,
+                        skipped = skipped,
+                        "Storage sync complete"
+                    );
+                }
             }
         },
         NetworkEvent::PeerConnected(peer_id) => {

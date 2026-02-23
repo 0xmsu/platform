@@ -1160,6 +1160,8 @@ fn expected_signer(message: &P2PMessage) -> Option<&Hotkey> {
         P2PMessage::CoreStateResponse(msg) => Some(&msg.responder),
         P2PMessage::ChallengeSyncProposal(msg) => Some(&msg.proposer),
         P2PMessage::ChallengeSyncVote(msg) => Some(&msg.voter),
+        P2PMessage::StorageSyncRequest(msg) => Some(&msg.requester),
+        P2PMessage::StorageSyncResponse(msg) => Some(&msg.responder),
     }
 }
 

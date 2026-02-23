@@ -52,9 +52,9 @@ pub use messages::{
     MerkleNode, MerkleProof, NewViewMessage, P2PMessage, PeerAnnounceMessage, PrePrepare,
     PrepareMessage, PreparedProof, ProposalContent, RoundId, SequenceNumber, SignedP2PMessage,
     StateChangeType, StateMutationProposalMessage, StateMutationType, StateMutationVoteMessage,
-    StateRequest, StateResponse, StorageProposalMessage, StorageRootSyncMessage,
-    StorageVoteMessage, SubmissionMessage, TaskProgressMessage, TaskResultMessage,
-    ViewChangeMessage, ViewNumber, WeightVoteMessage,
+    StateRequest, StateResponse, StorageProposalMessage, StorageRootSyncMessage, StorageSyncEntry,
+    StorageSyncRequestMessage, StorageSyncResponseMessage, StorageVoteMessage, SubmissionMessage,
+    TaskProgressMessage, TaskResultMessage, ViewChangeMessage, ViewNumber, WeightVoteMessage,
 };
 pub use network::{
     CombinedBehaviour, CombinedEvent, NetworkBehaviour, NetworkError, NetworkEvent, NetworkRunner,
