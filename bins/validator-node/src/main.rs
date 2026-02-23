@@ -1256,6 +1256,24 @@ async fn main() -> Result<()> {
                                         );
                                     }
                                 }
+                            } else if update_type == "activate" {
+                                // Handle activate action locally
+                                mutate_and_persist(storage.clone(), chain_state.clone(), "activate_local", |cs| {
+                                    cs.set_challenge_active(&challenge_id, true);
+                                }).await;
+                                state_manager.apply(|state| {
+                                    state.set_challenge_active(&challenge_id, true);
+                                });
+                                info!(challenge_id = %challenge_id, "Challenge activated locally");
+                            } else if update_type == "deactivate" {
+                                // Handle deactivate action locally
+                                mutate_and_persist(storage.clone(), chain_state.clone(), "deactivate_local", |cs| {
+                                    cs.set_challenge_active(&challenge_id, false);
+                                }).await;
+                                state_manager.apply(|state| {
+                                    state.set_challenge_active(&challenge_id, false);
+                                });
+                                info!(challenge_id = %challenge_id, "Challenge deactivated locally");
                             }
                         }
                     }
