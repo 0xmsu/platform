@@ -750,7 +750,9 @@ impl ChainState {
 
     /// Check whether the network is currently in the bootstrap period
     pub fn is_in_bootstrap_period(&self) -> bool {
-        self.bootstrap_active || self.epoch < platform_core::constants::BOOTSTRAP_PERIOD_EPOCHS
+        self.bootstrap_active
+            || self.epoch < platform_core::constants::BOOTSTRAP_PERIOD_EPOCHS
+            || self.bittensor_block < platform_core::constants::BOOTSTRAP_END_BLOCK
     }
 
     /// Finalize epoch weights (stake-weighted aggregation)

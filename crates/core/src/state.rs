@@ -2,7 +2,8 @@
 
 use crate::{
     hash_data, BlockHeight, Challenge, ChallengeId, ChallengeWeightAllocation, Hotkey, Job,
-    MechanismWeightConfig, NetworkConfig, Result, Stake, ValidatorInfo, WasmChallengeConfig,
+    MechanismWeightConfig, NetworkConfig, Result, Stake, SudoAction, ValidatorInfo,
+    WasmChallengeConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -82,6 +83,14 @@ pub struct ChainState {
     /// Loaded from WASM modules after ChallengeUpdate
     #[serde(default)]
     pub challenge_routes: HashMap<ChallengeId, Vec<ChallengeRouteInfo>>,
+
+    /// Whether the network is paused (set by sudo EmergencyPause)
+    #[serde(default)]
+    pub paused: bool,
+
+    /// Reason for the pause (if paused)
+    #[serde(default)]
+    pub pause_reason: Option<String>,
 }
 
 /// Route information for a challenge
@@ -115,6 +124,8 @@ impl Default for ChainState {
             last_updated: chrono::Utc::now(),
             registered_hotkeys: std::collections::HashSet::new(),
             challenge_routes: HashMap::new(),
+            paused: false,
+            pause_reason: None,
         }
     }
 }
@@ -138,6 +149,8 @@ impl ChainState {
             last_updated: chrono::Utc::now(),
             registered_hotkeys: std::collections::HashSet::new(),
             challenge_routes: HashMap::new(),
+            paused: false,
+            pause_reason: None,
         };
         state.update_hash();
         state
@@ -180,6 +193,114 @@ impl ChainState {
     /// Check if a hotkey is the sudo key
     pub fn is_sudo(&self, hotkey: &Hotkey) -> bool {
         self.sudo_key == *hotkey
+    }
+
+    /// Apply a sudo action to the chain state
+    pub fn apply_sudo_action(&mut self, action: &SudoAction) -> Result<()> {
+        match action {
+            SudoAction::UpdateConfig { config } => {
+                tracing::info!("Sudo: updating network config");
+                self.config = config.clone();
+            }
+            SudoAction::SetChallengeWeight {
+                challenge_id,
+                mechanism_id,
+                weight_ratio,
+            } => {
+                tracing::info!(
+                    challenge_id = %challenge_id,
+                    mechanism_id = mechanism_id,
+                    weight_ratio = weight_ratio,
+                    "Sudo: setting challenge weight"
+                );
+                let allocation =
+                    ChallengeWeightAllocation::new(*challenge_id, *mechanism_id, *weight_ratio);
+                self.challenge_weights.insert(*challenge_id, allocation);
+            }
+            SudoAction::SetMechanismBurnRate {
+                mechanism_id,
+                burn_rate,
+            } => {
+                tracing::info!(
+                    mechanism_id = mechanism_id,
+                    burn_rate = burn_rate,
+                    "Sudo: setting mechanism burn rate"
+                );
+                let config = self
+                    .mechanism_configs
+                    .entry(*mechanism_id)
+                    .or_insert_with(|| MechanismWeightConfig::new(*mechanism_id));
+                config.base_burn_rate = burn_rate.clamp(0.0, 1.0);
+            }
+            SudoAction::SetMechanismConfig {
+                mechanism_id,
+                config,
+            } => {
+                tracing::info!(
+                    mechanism_id = mechanism_id,
+                    "Sudo: setting mechanism config"
+                );
+                self.mechanism_configs.insert(*mechanism_id, config.clone());
+            }
+            SudoAction::SetRequiredVersion {
+                min_version,
+                recommended_version,
+                mandatory,
+                deadline_block,
+                ..
+            } => {
+                tracing::info!(
+                    min_version = %min_version,
+                    recommended_version = %recommended_version,
+                    mandatory = mandatory,
+                    "Sudo: setting required version"
+                );
+                self.required_version = Some(RequiredVersion {
+                    min_version: min_version.clone(),
+                    recommended_version: recommended_version.clone(),
+                    mandatory: *mandatory,
+                    deadline_block: *deadline_block,
+                });
+            }
+            SudoAction::AddValidator { info } => {
+                tracing::info!(hotkey = %info.hotkey, "Sudo: adding validator");
+                self.add_validator(info.clone())?;
+                return Ok(());
+            }
+            SudoAction::RemoveValidator { hotkey } => {
+                tracing::info!(hotkey = %hotkey, "Sudo: removing validator");
+                self.remove_validator(hotkey);
+                return Ok(());
+            }
+            SudoAction::EmergencyPause { reason } => {
+                tracing::warn!(reason = %reason, "Sudo: EMERGENCY PAUSE");
+                self.paused = true;
+                self.pause_reason = Some(reason.clone());
+            }
+            SudoAction::Resume => {
+                tracing::info!("Sudo: resuming from pause");
+                self.paused = false;
+                self.pause_reason = None;
+            }
+            SudoAction::ForceStateUpdate { state } => {
+                tracing::warn!("Sudo: FORCE STATE UPDATE - replacing entire state");
+                *self = state.clone();
+                return Ok(());
+            }
+            SudoAction::RenameChallenge {
+                challenge_id,
+                new_name,
+            } => {
+                tracing::info!(
+                    challenge_id = %challenge_id,
+                    new_name = %new_name,
+                    "Sudo: renaming challenge"
+                );
+                self.rename_challenge(challenge_id, new_name.clone());
+            }
+        }
+        self.update_hash();
+        Ok(())
     }
 
     /// Add a validator

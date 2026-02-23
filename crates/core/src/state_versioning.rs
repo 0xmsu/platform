@@ -159,6 +159,8 @@ impl ChainStateV1 {
             last_updated: self.last_updated,
             registered_hotkeys: HashSet::new(), // New in V2
             challenge_routes: HashMap::new(),
+            paused: false,
+            pause_reason: None,
         }
     }
 }
@@ -210,6 +212,8 @@ impl ChainStateV2 {
             last_updated: self.last_updated,
             registered_hotkeys: self.registered_hotkeys,
             challenge_routes: HashMap::new(),
+            paused: false,
+            pause_reason: None,
         }
     }
 }

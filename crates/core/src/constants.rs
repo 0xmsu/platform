@@ -82,6 +82,9 @@ pub const MIN_VALIDATOR_STAKE_TAO: u64 = 10_000;
 /// Number of epochs during which UID 0 dominates weight setting
 pub const BOOTSTRAP_PERIOD_EPOCHS: u64 = 100;
 
+/// Bittensor block number until which UID 0 dominates weight setting
+pub const BOOTSTRAP_END_BLOCK: u64 = 7_612_000;
+
 /// Weight assigned to UID 0 during the bootstrap period
 pub const BOOTSTRAP_UID0_WEIGHT: u16 = u16::MAX;
 

@@ -60,6 +60,8 @@ pub enum RpcP2PCommand {
         update_type: String,
         data: Vec<u8>,
     },
+    /// Broadcast a SudoAction (config/emission/weight changes)
+    BroadcastSudoAction { action: platform_core::SudoAction },
 }
 
 /// RPC Server
@@ -227,6 +229,16 @@ impl RpcServer {
                     let handler = handler.clone();
                     let p2p_tx = p2p_tx.clone();
                     async move { sudo_challenge_handler(handler, p2p_tx, body.0).await }
+                })
+            })
+            // Sudo endpoint for config/emission/weight changes
+            .route("/sudo/action", {
+                let chain_state = self.state.chain_state.clone();
+                let p2p_tx = self.p2p_tx.clone();
+                post(move |body: Json<Value>| {
+                    let chain_state = chain_state.clone();
+                    let p2p_tx = p2p_tx.clone();
+                    async move { sudo_action_handler(chain_state, p2p_tx, body.0).await }
                 })
             })
             .with_state(self.state.clone())
@@ -1117,4 +1129,140 @@ async fn sudo_challenge_handler(
             })),
         )
     }
+}
+
+/// Handler for sudo config/emission/weight actions
+async fn sudo_action_handler(
+    chain_state: Arc<RwLock<ChainState>>,
+    p2p_tx: Option<mpsc::Sender<RpcP2PCommand>>,
+    body: Value,
+) -> impl IntoResponse {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct SudoActionRequest {
+        action: Value,
+        signature: String,
+        timestamp: i64,
+    }
+
+    let request: SudoActionRequest = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "message": format!("Invalid request: {}", e)
+                })),
+            );
+        }
+    };
+
+    // Verify timestamp is recent (within 5 minutes)
+    let now = chrono::Utc::now().timestamp_millis();
+    if (now - request.timestamp).abs() > 5 * 60 * 1000 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "message": "Request timestamp is too old or in the future"
+            })),
+        );
+    }
+
+    // Deserialize the SudoAction
+    let action: platform_core::SudoAction = match serde_json::from_value(request.action.clone()) {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "message": format!("Invalid sudo action: {}", e)
+                })),
+            );
+        }
+    };
+
+    // Verify signature
+    let signature_bytes = match hex::decode(&request.signature) {
+        Ok(s) if s.len() == 64 => s,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "message": "Invalid signature format"
+                })),
+            );
+        }
+    };
+
+    // Sign format: "sudo:action:{action_json}:{timestamp}"
+    let msg_to_sign = format!(
+        "sudo:action:{}:{}",
+        request.action.to_string(),
+        request.timestamp
+    );
+
+    let signature = match sp_core::sr25519::Signature::try_from(signature_bytes.as_slice()) {
+        Ok(sig) => sig,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "success": false,
+                    "message": "Invalid signature"
+                })),
+            );
+        }
+    };
+
+    let sudo_public = sp_core::sr25519::Public::from_raw(SUDO_KEY_BYTES);
+    if !sp_core::sr25519::Pair::verify(&signature, msg_to_sign.as_bytes(), &sudo_public) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "success": false,
+                "message": "Invalid signature - not from sudo key"
+            })),
+        );
+    }
+
+    // Apply to local chain state
+    {
+        let mut cs = chain_state.write();
+        if let Err(e) = cs.apply_sudo_action(&action) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "message": format!("Failed to apply sudo action: {}", e)
+                })),
+            );
+        }
+    }
+
+    info!("Sudo action applied locally: {:?}", action);
+
+    // Broadcast via P2P
+    if let Some(tx) = p2p_tx {
+        let cmd = RpcP2PCommand::BroadcastSudoAction {
+            action: action.clone(),
+        };
+        if let Err(e) = tx.send(cmd).await {
+            warn!(error = %e, "Failed to broadcast sudo action via P2P");
+        } else {
+            info!("Sudo action broadcast to P2P network");
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "message": "Sudo action applied and broadcast"
+        })),
+    )
 }

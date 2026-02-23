@@ -40,8 +40,10 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use wasm_executor::{WasmChallengeExecutor, WasmExecutorConfig};
 
-/// Storage key for persisted chain state
+/// Storage key for persisted P2P chain state
 const STATE_STORAGE_KEY: &str = "chain_state";
+/// Storage key for persisted core ChainState (wasm_challenge_configs, routes, etc.)
+const CORE_STATE_STORAGE_KEY: &str = "core_chain_state";
 
 /// Maximum length for user-provided strings logged from P2P messages
 const MAX_LOG_FIELD_LEN: usize = 256;
@@ -345,8 +347,14 @@ async fn main() -> Result<()> {
     let validator_set = Arc::new(ValidatorSet::new(keypair.clone(), p2p_config.min_stake));
     info!("P2P network config initialized");
 
-    // Create shared ChainState - will be synchronized with P2P data and exposed via RPC
-    let chain_state = Arc::new(RwLock::new(platform_core::ChainState::production_default()));
+    // Load persisted core ChainState or create fresh
+    let core_state = load_core_state_from_storage(&storage)
+        .await
+        .unwrap_or_else(|| {
+            info!("No persisted core state found, starting fresh");
+            platform_core::ChainState::production_default()
+        });
+    let chain_state = Arc::new(RwLock::new(core_state));
 
     // Initialize state manager, loading persisted state if available
     let state_manager = Arc::new(
@@ -692,6 +700,103 @@ async fn main() -> Result<()> {
         info!("RPC server started on {}", args.rpc_addr);
     }
 
+    // Reload WASM modules from persisted challenges on startup
+    if let Some(ref executor) = wasm_executor {
+        let challenges: Vec<(platform_core::ChallengeId, String)> = {
+            let cs = chain_state.read();
+            cs.wasm_challenge_configs
+                .iter()
+                .map(|(id, config)| (*id, config.module.module_path.clone()))
+                .collect()
+        };
+
+        if !challenges.is_empty() {
+            info!(
+                "Reloading {} WASM modules from persisted state",
+                challenges.len()
+            );
+            for (challenge_id, module_path) in &challenges {
+                let challenge_id_str = challenge_id.to_string();
+                // Try to load WASM bytes from distributed storage
+                let wasm_key =
+                    platform_distributed_storage::StorageKey::new("wasm", &challenge_id_str);
+                match storage
+                    .get(
+                        &wasm_key,
+                        platform_distributed_storage::GetOptions::default(),
+                    )
+                    .await
+                {
+                    Ok(Some(stored)) => {
+                        let exec = executor.clone();
+                        let cid = *challenge_id;
+                        let cid_str = challenge_id_str.clone();
+                        let mp = module_path.clone();
+                        let cs = chain_state.clone();
+                        let wasm_bytes = stored.data;
+                        std::thread::spawn(move || {
+                            // Cache the compiled module
+                            match exec.execute_get_routes_from_bytes(
+                                &mp,
+                                &wasm_bytes,
+                                &wasm_runtime_interface::NetworkPolicy::default(),
+                                &wasm_runtime_interface::SandboxPolicy::default(),
+                            ) {
+                                Ok((routes_data, _)) => {
+                                    if let Ok(routes) =
+                                        bincode::deserialize::<
+                                            Vec<platform_challenge_sdk_wasm::WasmRouteDefinition>,
+                                        >(&routes_data)
+                                    {
+                                        tracing::info!(
+                                            challenge_id = %cid,
+                                            routes_count = routes.len(),
+                                            "Reloaded WASM routes on startup"
+                                        );
+                                        let route_infos: Vec<platform_core::ChallengeRouteInfo> =
+                                            routes
+                                                .iter()
+                                                .map(|r| platform_core::ChallengeRouteInfo {
+                                                    method: r.method.clone(),
+                                                    path: r.path.clone(),
+                                                    description: r.description.clone(),
+                                                    requires_auth: r.requires_auth,
+                                                })
+                                                .collect();
+                                        let mut state = cs.write();
+                                        state.register_challenge_routes(cid, route_infos);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        challenge_id = %cid,
+                                        error = %e,
+                                        "Failed to reload WASM module on startup"
+                                    );
+                                }
+                            }
+                        });
+                    }
+                    Ok(None) => {
+                        warn!(
+                            challenge_id = %challenge_id,
+                            "WASM bytes not found in storage for persisted challenge"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            challenge_id = %challenge_id,
+                            error = %e,
+                            "Failed to load WASM bytes from storage"
+                        );
+                    }
+                }
+            }
+            // Give threads time to compile
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+
     info!("Decentralized validator running. Press Ctrl+C to stop.");
 
     let netuid = args.netuid;
@@ -748,6 +853,48 @@ async fn main() -> Result<()> {
             // RPC -> P2P commands (challenge updates from sudo)
             Some(cmd) = rpc_p2p_rx.recv() => {
                 match cmd {
+                    platform_rpc::RpcP2PCommand::BroadcastSudoAction { action } => {
+                        info!("Received sudo action from RPC: {:?}", action);
+
+                        // Apply to local chain state (RPC server already applied, but handle
+                        // the case where this is received from P2P relay)
+                        {
+                            let mut cs = chain_state.write();
+                            if let Err(e) = cs.apply_sudo_action(&action) {
+                                error!("Failed to apply sudo action: {}", e);
+                            }
+                        }
+
+                        // Broadcast as a ChallengeUpdate with type "sudo_action"
+                        // so peer validators can receive and apply it
+                        let action_bytes = match bincode::serialize(&action) {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                error!("Failed to serialize sudo action: {}", e);
+                                continue;
+                            }
+                        };
+
+                        let timestamp = chrono::Utc::now().timestamp_millis();
+                        let msg_to_sign = format!("challenge_update:sudo:sudo_action:{}", timestamp);
+                        let signature = keypair.sign(msg_to_sign.as_bytes());
+
+                        let update_msg = platform_p2p_consensus::ChallengeUpdateMessage {
+                            challenge_id: platform_core::ChallengeId::from_string("sudo"),
+                            updater: keypair.hotkey(),
+                            update_type: "sudo_action".to_string(),
+                            data: action_bytes,
+                            timestamp,
+                            signature: signature.signature.to_vec(),
+                        };
+
+                        let msg = P2PMessage::ChallengeUpdate(update_msg);
+                        if let Err(e) = p2p_broadcast_tx.send(platform_p2p_consensus::P2PCommand::Broadcast(msg)).await {
+                            error!("Failed to broadcast sudo action: {}", e);
+                        } else {
+                            info!("Sudo action broadcast to P2P network");
+                        }
+                    }
                     platform_rpc::RpcP2PCommand::BroadcastChallengeUpdate { challenge_id, update_type, data } => {
                         info!(
                             challenge_id = %challenge_id,
@@ -989,9 +1136,12 @@ async fn main() -> Result<()> {
             // Periodic state persistence
             _ = state_persist_interval.tick() => {
                 if let Err(e) = persist_state_to_storage(&storage, &state_manager).await {
-                    warn!("Failed to persist state: {}", e);
+                    warn!("Failed to persist P2P state: {}", e);
                 } else {
                     debug!("State persisted to storage");
+                }
+                if let Err(e) = persist_core_state_to_storage(&storage, &chain_state).await {
+                    warn!("Failed to persist core state: {}", e);
                 }
             }
 
@@ -1147,6 +1297,43 @@ async fn persist_state_to_storage(
 ) -> Result<()> {
     let state = state_manager.snapshot();
     let key = StorageKey::new("state", STATE_STORAGE_KEY);
+    storage.put_json(key, &state).await?;
+    Ok(())
+}
+
+/// Load persisted core ChainState (wasm_challenge_configs, routes, etc.)
+async fn load_core_state_from_storage(
+    storage: &Arc<LocalStorage>,
+) -> Option<platform_core::ChainState> {
+    let key = StorageKey::new("state", CORE_STATE_STORAGE_KEY);
+    match storage.get_json::<platform_core::ChainState>(&key).await {
+        Ok(Some(state)) => {
+            info!(
+                "Loaded persisted core state: wasm_challenges={}, challenge_routes={}, validators={}",
+                state.wasm_challenge_configs.len(),
+                state.challenge_routes.len(),
+                state.validators.len(),
+            );
+            Some(state)
+        }
+        Ok(None) => {
+            debug!("No persisted core state found in storage");
+            None
+        }
+        Err(e) => {
+            warn!("Failed to load persisted core state: {}", e);
+            None
+        }
+    }
+}
+
+/// Persist core ChainState to distributed storage
+async fn persist_core_state_to_storage(
+    storage: &Arc<LocalStorage>,
+    chain_state: &Arc<RwLock<platform_core::ChainState>>,
+) -> Result<()> {
+    let state = chain_state.read().clone();
+    let key = StorageKey::new("state", CORE_STATE_STORAGE_KEY);
     storage.put_json(key, &state).await?;
     Ok(())
 }
@@ -1661,6 +1848,22 @@ async fn handle_network_event(
                                         new_name = %new_name,
                                         "Failed to rename challenge - not found or name conflict"
                                     );
+                                }
+                            }
+                        }
+                        "sudo_action" => {
+                            match bincode::deserialize::<platform_core::SudoAction>(&update.data) {
+                                Ok(action) => {
+                                    info!("Applying sudo action from P2P: {:?}", action);
+                                    let mut cs = chain_state.write();
+                                    if let Err(e) = cs.apply_sudo_action(&action) {
+                                        error!("Failed to apply sudo action from P2P: {}", e);
+                                    } else {
+                                        info!("Sudo action applied from P2P successfully");
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to deserialize sudo action from P2P: {}", e);
                                 }
                             }
                         }

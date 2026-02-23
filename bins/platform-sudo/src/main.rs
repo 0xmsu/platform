@@ -62,6 +62,65 @@ enum Commands {
         #[arg(short, long)]
         name: String,
     },
+    /// Set challenge weight/emission ratio on a mechanism
+    SetEmission {
+        /// Challenge ID (UUID)
+        #[arg(short = 'c', long)]
+        challenge_id: String,
+        /// Mechanism ID (default: 0)
+        #[arg(short, long, default_value = "0")]
+        mechanism_id: u8,
+        /// Weight ratio (0.0 - 1.0)
+        #[arg(short, long)]
+        weight: f64,
+    },
+    /// Set mechanism burn rate
+    SetBurnRate {
+        /// Mechanism ID
+        #[arg(short, long, default_value = "0")]
+        mechanism_id: u8,
+        /// Burn rate (0.0 - 1.0), e.g., 0.1 = 10% to UID 0
+        #[arg(short, long)]
+        rate: f64,
+    },
+    /// Configure mechanism weight distribution
+    SetMechanismConfig {
+        /// Mechanism ID
+        #[arg(short, long, default_value = "0")]
+        mechanism_id: u8,
+        /// Burn rate (0.0 - 1.0)
+        #[arg(long, default_value = "0.0")]
+        burn_rate: f64,
+        /// Equal distribution among challenges
+        #[arg(long)]
+        equal_distribution: bool,
+        /// Minimum weight threshold
+        #[arg(long, default_value = "0.0001")]
+        min_weight: f64,
+    },
+    /// Emergency pause the network
+    Pause {
+        /// Reason for the pause
+        #[arg(short, long)]
+        reason: String,
+    },
+    /// Resume the network after a pause
+    Resume,
+    /// Set required validator version
+    SetVersion {
+        /// Minimum required version (e.g., "0.2.0")
+        #[arg(long)]
+        min: String,
+        /// Recommended version
+        #[arg(long)]
+        recommended: String,
+        /// Whether the update is mandatory
+        #[arg(long)]
+        mandatory: bool,
+        /// Deadline block (optional)
+        #[arg(long)]
+        deadline: Option<u64>,
+    },
     /// List all challenges
     List,
     /// Show validator status
@@ -292,6 +351,42 @@ impl SudoCli {
         Ok(())
     }
 
+    async fn send_sudo_action(&self, action: serde_json::Value) -> Result<()> {
+        let timestamp = chrono::Utc::now().timestamp_millis();
+
+        let msg_to_sign = format!("sudo:action:{}:{}", action.to_string(), timestamp);
+        let signature = self.sign(msg_to_sign.as_bytes())?;
+
+        let request = serde_json::json!({
+            "action": action,
+            "signature": hex::encode(&signature),
+            "timestamp": timestamp,
+        });
+
+        let response = self
+            .client
+            .post(format!("{}/sudo/action", self.rpc_url))
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send sudo action")?;
+
+        if response.status().is_success() {
+            let result: SudoResponse = response.json().await?;
+            if result.success {
+                info!("Sudo action applied: {}", result.message);
+            } else {
+                warn!("Sudo action failed: {}", result.message);
+            }
+        } else {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            error!(status = %status, body = %text, "Sudo action request failed");
+        }
+
+        Ok(())
+    }
+
     async fn list_challenges(&self) -> Result<()> {
         let response = self
             .client
@@ -442,6 +537,80 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Rename { id, name }) => {
             sudo_cli.rename_challenge(&id, &name).await?;
+        }
+        Some(Commands::SetEmission {
+            challenge_id,
+            mechanism_id,
+            weight,
+        }) => {
+            let cid = ChallengeId::from_string(&challenge_id);
+            let action = serde_json::json!({
+                "SetChallengeWeight": {
+                    "challenge_id": cid.0.to_string(),
+                    "mechanism_id": mechanism_id,
+                    "weight_ratio": weight
+                }
+            });
+            sudo_cli.send_sudo_action(action).await?;
+        }
+        Some(Commands::SetBurnRate { mechanism_id, rate }) => {
+            let action = serde_json::json!({
+                "SetMechanismBurnRate": {
+                    "mechanism_id": mechanism_id,
+                    "burn_rate": rate
+                }
+            });
+            sudo_cli.send_sudo_action(action).await?;
+        }
+        Some(Commands::SetMechanismConfig {
+            mechanism_id,
+            burn_rate,
+            equal_distribution,
+            min_weight,
+        }) => {
+            let action = serde_json::json!({
+                "SetMechanismConfig": {
+                    "mechanism_id": mechanism_id,
+                    "config": {
+                        "mechanism_id": mechanism_id,
+                        "base_burn_rate": burn_rate,
+                        "equal_distribution": equal_distribution,
+                        "min_weight_threshold": min_weight,
+                        "max_weight_cap": 1.0,
+                        "active": true
+                    }
+                }
+            });
+            sudo_cli.send_sudo_action(action).await?;
+        }
+        Some(Commands::Pause { reason }) => {
+            let action = serde_json::json!({
+                "EmergencyPause": {
+                    "reason": reason
+                }
+            });
+            sudo_cli.send_sudo_action(action).await?;
+        }
+        Some(Commands::Resume) => {
+            let action = serde_json::json!("Resume");
+            sudo_cli.send_sudo_action(action).await?;
+        }
+        Some(Commands::SetVersion {
+            min,
+            recommended,
+            mandatory,
+            deadline,
+        }) => {
+            let action = serde_json::json!({
+                "SetRequiredVersion": {
+                    "min_version": min,
+                    "recommended_version": recommended,
+                    "mandatory": mandatory,
+                    "deadline_block": deadline,
+                    "release_notes": null
+                }
+            });
+            sudo_cli.send_sudo_action(action).await?;
         }
         Some(Commands::List) => {
             sudo_cli.list_challenges().await?;
