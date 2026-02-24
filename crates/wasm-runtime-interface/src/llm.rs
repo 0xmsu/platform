@@ -1,12 +1,13 @@
 //! LLM Host Functions for WASM Challenges
 //!
-//! Provides host functions that allow WASM code to perform LLM inference
-//! via the Chutes API (llm.chutes.ai). Gated by `LlmPolicy`.
+//! Acts as a pure proxy: the challenge WASM builds the complete OpenAI-compatible
+//! request. The host adds authentication, forces `stream: false`, forwards to the
+//! LLM endpoint, and returns the full response.
 //!
 //! # Host Functions
 //!
-//! - `llm_chat_completion(req_ptr, req_len, resp_ptr, resp_len) -> i32` — Send chat completion request
-//! - `llm_is_available() -> i32` — Check if LLM inference is available (has API key)
+//! - `llm_chat_completion(req_ptr, req_len, resp_ptr, resp_len) -> i32` — Proxy chat completion
+//! - `llm_is_available() -> i32` — Check if LLM proxy is available (has API key)
 
 use crate::runtime::{HostFunctionRegistrar, RuntimeState, WasmRuntimeError};
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,7 @@ use tracing::warn;
 use wasmtime::{Caller, Linker, Memory};
 
 const MAX_CHAT_REQUEST_SIZE: u64 = 4 * 1024 * 1024;
-const LLM_REQUEST_TIMEOUT_SECS: u64 = 60;
+const LLM_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 pub const HOST_LLM_NAMESPACE: &str = "platform_llm";
 pub const HOST_LLM_CHAT_COMPLETION: &str = "llm_chat_completion";
@@ -154,6 +155,8 @@ fn handle_is_available(caller: &Caller<RuntimeState>) -> i32 {
     }
 }
 
+/// Pure proxy: deserialize SDK request (bincode), convert to OpenAI JSON,
+/// force stream:false, add auth, forward, parse response, return bincode.
 fn handle_chat_completion(
     caller: &mut Caller<RuntimeState>,
     req_ptr: i32,
@@ -186,10 +189,14 @@ fn handle_chat_completion(
     let request_bytes = match read_wasm_memory(caller, req_ptr, req_len as usize) {
         Ok(b) => b,
         Err(err) => {
-            warn!(error = %err, "llm_chat_completion: failed to read request from wasm memory");
+            warn!(error = %err, "llm proxy: failed to read request from wasm memory");
             return LlmHostStatus::InternalError.to_i32();
         }
     };
+
+    if request_bytes.len() as u64 > MAX_CHAT_REQUEST_SIZE {
+        return LlmHostStatus::InvalidRequest.to_i32();
+    }
 
     let api_key;
     let endpoint;
@@ -202,76 +209,30 @@ fn handle_chat_completion(
         endpoint = state.policy.endpoint.clone();
     }
 
-    #[derive(Deserialize)]
-    struct ChatRequest {
-        model: String,
-        messages: Vec<ChatMessage>,
-        max_tokens: u32,
-        temperature: f32,
-    }
-
-    #[derive(Deserialize)]
-    struct ChatMessage {
-        role: String,
-        content: String,
-    }
-
-    if request_bytes.len() as u64 > MAX_CHAT_REQUEST_SIZE {
-        return LlmHostStatus::InvalidRequest.to_i32();
-    }
-
-    let chat_req: ChatRequest = match bincode::deserialize(&request_bytes) {
+    // Deserialize the SDK request (bincode-encoded LlmRequest from challenge-sdk-wasm)
+    let sdk_req: SdkRequest = match bincode::deserialize(&request_bytes) {
         Ok(r) => r,
         Err(_) => return LlmHostStatus::InvalidRequest.to_i32(),
     };
 
+    // Validate model against allowed list
     {
         let state = &caller.data().llm_state;
         let allowed = &state.policy.allowed_models;
-        if !allowed.is_empty() && !allowed.contains(&chat_req.model) {
-            warn!(
-                model = %chat_req.model,
-                "llm_chat_completion: model not in allowed list"
-            );
+        if !allowed.is_empty() && !allowed.contains(&sdk_req.model) {
+            warn!(model = %sdk_req.model, "llm proxy: model not in allowed list");
             return LlmHostStatus::InvalidRequest.to_i32();
         }
     }
 
-    #[derive(Serialize)]
-    struct OpenAiRequest {
-        model: String,
-        messages: Vec<OpenAiMessage>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_tokens: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        temperature: Option<f32>,
-    }
-
-    #[derive(Serialize)]
-    struct OpenAiMessage {
-        role: String,
-        content: String,
-    }
-
-    let openai_req = OpenAiRequest {
-        model: chat_req.model,
-        messages: chat_req
-            .messages
-            .into_iter()
-            .map(|m| OpenAiMessage {
-                role: m.role,
-                content: m.content,
-            })
-            .collect(),
-        max_tokens: Some(chat_req.max_tokens),
-        temperature: Some(chat_req.temperature),
-    };
-
-    let json_body = match serde_json::to_vec(&openai_req) {
+    // Build OpenAI-compatible JSON, force stream: false
+    let openai_json = build_openai_request(&sdk_req);
+    let json_body = match serde_json::to_vec(&openai_json) {
         Ok(b) => b,
         Err(_) => return LlmHostStatus::InvalidRequest.to_i32(),
     };
 
+    // Forward to LLM endpoint
     let client = reqwest::blocking::Client::new();
     let http_response = match client
         .post(&endpoint)
@@ -283,7 +244,7 @@ fn handle_chat_completion(
     {
         Ok(r) => r,
         Err(err) => {
-            warn!(error = %err, "llm_chat_completion: HTTP request failed");
+            warn!(error = %err, "llm proxy: HTTP request failed");
             return LlmHostStatus::ApiError.to_i32();
         }
     };
@@ -291,71 +252,21 @@ fn handle_chat_completion(
     let response_body = match http_response.bytes() {
         Ok(b) => b.to_vec(),
         Err(err) => {
-            warn!(error = %err, "llm_chat_completion: failed to read response body");
+            warn!(error = %err, "llm proxy: failed to read response body");
             return LlmHostStatus::ApiError.to_i32();
         }
     };
 
-    #[derive(Deserialize)]
-    struct OpenAiResponse {
-        choices: Option<Vec<OpenAiChoice>>,
-        usage: Option<OpenAiUsage>,
-    }
-
-    #[derive(Deserialize)]
-    struct OpenAiChoice {
-        message: Option<OpenAiRespMessage>,
-    }
-
-    #[derive(Deserialize)]
-    struct OpenAiRespMessage {
-        content: Option<String>,
-    }
-
-    #[derive(Deserialize)]
-    struct OpenAiUsage {
-        prompt_tokens: Option<u32>,
-        completion_tokens: Option<u32>,
-        total_tokens: Option<u32>,
-    }
-
-    let openai_resp: OpenAiResponse = match serde_json::from_slice(&response_body) {
+    // Parse OpenAI response and convert to SDK response (bincode)
+    let sdk_response = match parse_openai_response(&response_body) {
         Ok(r) => r,
         Err(err) => {
-            warn!(error = %err, "llm_chat_completion: failed to parse OpenAI response");
+            warn!(error = %err, "llm proxy: failed to parse response");
             return LlmHostStatus::ApiError.to_i32();
         }
     };
 
-    let content = openai_resp
-        .choices
-        .and_then(|mut c| c.pop())
-        .and_then(|c| c.message)
-        .and_then(|m| m.content)
-        .unwrap_or_default();
-
-    #[derive(Serialize)]
-    struct LlmResponsePayload {
-        content: String,
-        usage: Option<LlmUsagePayload>,
-    }
-
-    #[derive(Serialize)]
-    struct LlmUsagePayload {
-        prompt_tokens: u32,
-        completion_tokens: u32,
-        total_tokens: u32,
-    }
-
-    let usage = openai_resp.usage.map(|u| LlmUsagePayload {
-        prompt_tokens: u.prompt_tokens.unwrap_or(0),
-        completion_tokens: u.completion_tokens.unwrap_or(0),
-        total_tokens: u.total_tokens.unwrap_or(0),
-    });
-
-    let response_payload = LlmResponsePayload { content, usage };
-
-    let response_bytes = match bincode::serialize(&response_payload) {
+    let response_bytes = match bincode::serialize(&sdk_response) {
         Ok(b) => b,
         Err(_) => return LlmHostStatus::InternalError.to_i32(),
     };
@@ -365,13 +276,329 @@ fn handle_chat_completion(
     }
 
     if let Err(err) = write_wasm_memory(caller, resp_ptr, &response_bytes) {
-        warn!(error = %err, "llm_chat_completion: failed to write response to wasm memory");
+        warn!(error = %err, "llm proxy: failed to write response to wasm memory");
         return LlmHostStatus::InternalError.to_i32();
     }
 
     caller.data_mut().llm_state.requests_made += 1;
 
     response_bytes.len() as i32
+}
+
+// --- SDK types (mirroring challenge-sdk-wasm/src/llm_types.rs) ---
+
+#[derive(Deserialize)]
+struct SdkRequest {
+    model: String,
+    messages: Vec<SdkMessage>,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    frequency_penalty: Option<f32>,
+    presence_penalty: Option<f32>,
+    stop: Option<Vec<String>>,
+    tools: Option<Vec<SdkTool>>,
+    tool_choice: Option<SdkToolChoice>,
+    response_format: Option<SdkResponseFormat>,
+}
+
+#[derive(Deserialize)]
+struct SdkMessage {
+    role: String,
+    content: Option<String>,
+    name: Option<String>,
+    tool_calls: Option<Vec<SdkToolCall>>,
+    tool_call_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SdkTool {
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: SdkFunctionDef,
+}
+
+#[derive(Deserialize)]
+struct SdkFunctionDef {
+    name: String,
+    description: Option<String>,
+    parameters: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SdkToolChoice {
+    Auto,
+    None,
+    Required,
+    Specific { function: SdkToolChoiceFunction },
+}
+
+#[derive(Deserialize)]
+struct SdkToolChoiceFunction {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct SdkResponseFormat {
+    #[serde(rename = "type")]
+    format_type: String,
+}
+
+#[derive(Deserialize)]
+struct SdkToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: SdkFunctionCall,
+}
+
+#[derive(Deserialize)]
+struct SdkFunctionCall {
+    name: String,
+    arguments: String,
+}
+
+// --- OpenAI request/response types ---
+
+#[derive(Serialize)]
+struct OpenAiRequest {
+    model: String,
+    messages: Vec<OpenAiMessage>,
+    stream: bool, // always false
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frequency_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct OpenAiMessage {
+    role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+fn build_openai_request(sdk: &SdkRequest) -> OpenAiRequest {
+    let messages = sdk
+        .messages
+        .iter()
+        .map(|m| {
+            let tool_calls = m.tool_calls.as_ref().map(|tcs| {
+                tcs.iter()
+                    .map(|tc| {
+                        serde_json::json!({
+                            "id": tc.id,
+                            "type": tc.call_type,
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            }
+                        })
+                    })
+                    .collect()
+            });
+            OpenAiMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+                name: m.name.clone(),
+                tool_calls,
+                tool_call_id: m.tool_call_id.clone(),
+            }
+        })
+        .collect();
+
+    let tools = sdk.tools.as_ref().map(|ts| {
+        ts.iter()
+            .map(|t| {
+                let params: serde_json::Value = t
+                    .function
+                    .parameters
+                    .as_ref()
+                    .and_then(|p| serde_json::from_str(p).ok())
+                    .unwrap_or(serde_json::json!({}));
+                serde_json::json!({
+                    "type": t.tool_type,
+                    "function": {
+                        "name": t.function.name,
+                        "description": t.function.description,
+                        "parameters": params,
+                    }
+                })
+            })
+            .collect()
+    });
+
+    let tool_choice = sdk.tool_choice.as_ref().map(|tc| match tc {
+        SdkToolChoice::Auto => serde_json::json!("auto"),
+        SdkToolChoice::None => serde_json::json!("none"),
+        SdkToolChoice::Required => serde_json::json!("required"),
+        SdkToolChoice::Specific { function } => {
+            serde_json::json!({"type": "function", "function": {"name": function.name}})
+        }
+    });
+
+    let response_format = sdk
+        .response_format
+        .as_ref()
+        .map(|rf| serde_json::json!({"type": rf.format_type}));
+
+    OpenAiRequest {
+        model: sdk.model.clone(),
+        messages,
+        stream: false, // always non-streaming for WASM
+        max_tokens: sdk.max_tokens,
+        temperature: sdk.temperature,
+        top_p: sdk.top_p,
+        frequency_penalty: sdk.frequency_penalty,
+        presence_penalty: sdk.presence_penalty,
+        stop: sdk.stop.clone(),
+        tools,
+        tool_choice,
+        response_format,
+    }
+}
+
+// --- OpenAI response parsing ---
+
+#[derive(Deserialize)]
+struct OpenAiResponse {
+    choices: Option<Vec<OpenAiChoice>>,
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiChoice {
+    message: Option<OpenAiRespMessage>,
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiRespMessage {
+    content: Option<String>,
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiToolCall {
+    id: Option<String>,
+    #[serde(rename = "type")]
+    call_type: Option<String>,
+    function: Option<OpenAiFunctionCall>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiFunctionCall {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiUsage {
+    prompt_tokens: Option<u32>,
+    completion_tokens: Option<u32>,
+    total_tokens: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct SdkResponse {
+    content: Option<String>,
+    tool_calls: Vec<SdkResponseToolCall>,
+    usage: Option<SdkUsage>,
+    finish_reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SdkResponseToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: SdkResponseFunctionCall,
+}
+
+#[derive(Serialize)]
+struct SdkResponseFunctionCall {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Serialize)]
+struct SdkUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: u32,
+}
+
+fn parse_openai_response(body: &[u8]) -> Result<SdkResponse, String> {
+    let resp: OpenAiResponse =
+        serde_json::from_slice(body).map_err(|e| format!("JSON parse error: {e}"))?;
+
+    let choice = resp.choices.and_then(|mut c| {
+        if c.is_empty() {
+            None
+        } else {
+            Some(c.remove(0))
+        }
+    });
+
+    let (content, tool_calls_raw, finish_reason) = match choice {
+        Some(c) => {
+            let fr = c.finish_reason;
+            match c.message {
+                Some(msg) => (msg.content, msg.tool_calls.unwrap_or_default(), fr),
+                None => (None, Vec::new(), fr),
+            }
+        }
+        None => (None, Vec::new(), None),
+    };
+
+    let tool_calls = tool_calls_raw
+        .into_iter()
+        .filter_map(|tc| {
+            let func = tc.function?;
+            Some(SdkResponseToolCall {
+                id: tc.id.unwrap_or_default(),
+                call_type: tc.call_type.unwrap_or_else(|| "function".to_string()),
+                function: SdkResponseFunctionCall {
+                    name: func.name.unwrap_or_default(),
+                    arguments: func.arguments.unwrap_or_default(),
+                },
+            })
+        })
+        .collect();
+
+    let usage = resp.usage.map(|u| SdkUsage {
+        prompt_tokens: u.prompt_tokens.unwrap_or(0),
+        completion_tokens: u.completion_tokens.unwrap_or(0),
+        total_tokens: u.total_tokens.unwrap_or(0),
+    });
+
+    Ok(SdkResponse {
+        content,
+        tool_calls,
+        usage,
+        finish_reason,
+    })
 }
 
 fn read_wasm_memory(
@@ -474,5 +701,67 @@ mod tests {
         let serialized = bincode::serialize(&policy).unwrap();
         let deserialized: LlmPolicy = bincode::deserialize(&serialized).unwrap();
         assert!(deserialized.api_key.is_none());
+    }
+
+    #[test]
+    fn test_parse_openai_response_with_tool_calls() {
+        let response_json = serde_json::json!({
+            "id": "chatcmpl-123",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"location\": \"Paris\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 50,
+                "completion_tokens": 20,
+                "total_tokens": 70
+            }
+        });
+
+        let body = serde_json::to_vec(&response_json).unwrap();
+        let sdk_resp = parse_openai_response(&body).unwrap();
+
+        assert!(sdk_resp.content.is_none());
+        assert_eq!(sdk_resp.tool_calls.len(), 1);
+        assert_eq!(sdk_resp.tool_calls[0].id, "call_abc123");
+        assert_eq!(sdk_resp.tool_calls[0].function.name, "get_weather");
+        assert_eq!(sdk_resp.finish_reason, Some("tool_calls".to_string()));
+        assert_eq!(sdk_resp.usage.unwrap().total_tokens, 70);
+    }
+
+    #[test]
+    fn test_parse_openai_response_text_only() {
+        let response_json = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello, world!"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        });
+
+        let body = serde_json::to_vec(&response_json).unwrap();
+        let sdk_resp = parse_openai_response(&body).unwrap();
+
+        assert_eq!(sdk_resp.content, Some("Hello, world!".to_string()));
+        assert!(sdk_resp.tool_calls.is_empty());
+        assert_eq!(sdk_resp.finish_reason, Some("stop".to_string()));
     }
 }
