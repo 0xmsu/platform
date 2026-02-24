@@ -210,6 +210,11 @@ pub struct ChainState {
     /// Validators that have announced LLM inference capability (Chutes API key)
     #[serde(default, with = "hotkey_set_serde")]
     pub llm_capable_validators: std::collections::HashSet<Hotkey>,
+
+    /// Last computed subnet weights (mechanism_id -> (uids, u16 weights))
+    /// Updated at each commit window, served via `subnet_getWeights` RPC.
+    #[serde(skip)]
+    pub last_computed_weights: Vec<(u8, Vec<u16>, Vec<u16>)>,
 }
 
 /// Route information for a challenge
@@ -247,6 +252,7 @@ impl Default for ChainState {
             pause_reason: None,
             mutation_sequence: 0,
             llm_capable_validators: std::collections::HashSet::new(),
+            last_computed_weights: Vec::new(),
         }
     }
 }
@@ -274,6 +280,7 @@ impl ChainState {
             pause_reason: None,
             mutation_sequence: 0,
             llm_capable_validators: std::collections::HashSet::new(),
+            last_computed_weights: Vec::new(),
         };
         state.update_hash();
         state

@@ -52,6 +52,9 @@ bincode = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
 
+# HTTP client (for weight fallback)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
 # Error tracking
 sentry = { version = "0.46", features = ["tracing"] }
 sentry-tracing = "0.46"

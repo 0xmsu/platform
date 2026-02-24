@@ -3726,6 +3726,43 @@ async fn handle_block_event(
                     }
                 };
 
+                // Fallback: if all weights are burn-only, try fetching from
+                // the primary validator's RPC (chain.platform.network).
+                let all_burn_only = weights_to_submit
+                    .iter()
+                    .all(|(_, uids, _)| uids.len() == 1 && uids[0] == 0);
+                let weights_to_submit = if all_burn_only {
+                    info!("All local weights are burn-only, attempting HTTP fallback from chain.platform.network");
+                    match fetch_remote_weights().await {
+                        Ok(remote) if !remote.is_empty() => {
+                            info!(
+                                "Fetched {} mechanism weight entries from remote",
+                                remote.len()
+                            );
+                            remote
+                        }
+                        Ok(_) => {
+                            warn!("Remote returned empty weights, using local burn-only");
+                            weights_to_submit
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to fetch remote weights: {}, using local burn-only",
+                                e
+                            );
+                            weights_to_submit
+                        }
+                    }
+                } else {
+                    weights_to_submit
+                };
+
+                // Store computed weights in chain state for the subnet_getWeights RPC
+                {
+                    let mut cs = chain_state.write();
+                    cs.last_computed_weights = weights_to_submit.clone();
+                }
+
                 for (mechanism_id, uids, weights) in weights_to_submit {
                     info!(
                         "Submitting weights for mechanism {} ({} UIDs)",
@@ -4006,4 +4043,62 @@ async fn process_wasm_evaluations(
         }
     }
 }
+/// Fetch pre-computed weights from the primary validator's RPC endpoint.
+/// Returns Vec<(mechanism_id, uids, weights)> ready for submission.
+async fn fetch_remote_weights() -> anyhow::Result<Vec<(u8, Vec<u16>, Vec<u16>)>> {
+    let url = "https://chain.platform.network/rpc";
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "subnet_getWeights",
+        "params": {},
+        "id": 1
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let resp = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+
+    let weights_arr = resp
+        .get("result")
+        .and_then(|r| r.get("weights"))
+        .and_then(|w| w.as_array())
+        .ok_or_else(|| anyhow::anyhow!("Invalid response: missing result.weights"))?;
+
+    let mut result = Vec::new();
+    for entry in weights_arr {
+        let mechanism_id = entry
+            .get("mechanismId")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u8;
+        let entries = entry
+            .get("entries")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Missing entries in weight entry"))?;
+
+        let mut uids = Vec::new();
+        let mut vals = Vec::new();
+        for e in entries {
+            let uid = e.get("uid").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let weight = e.get("weight").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            uids.push(uid);
+            vals.push(weight);
+        }
+
+        if !uids.is_empty() {
+            result.push((mechanism_id, uids, vals));
+        }
+    }
+
+    Ok(result)
+}
+
 // Build trigger: 1771754356

@@ -21,7 +21,7 @@ services:
 
     ports:
       - "8080:8080"   # JSON-RPC API
-      - "8090:8090"   # P2P libp2p
+      - "${P2P_PORT:-8090}:${P2P_PORT:-8090}"   # P2P libp2p
 
     volumes:
       - validator-data:/data
@@ -33,9 +33,9 @@ services:
       - SUBTENSOR_ENDPOINT=${SUBTENSOR_ENDPOINT:-wss://entrypoint-finney.opentensor.ai:443}
       - NETUID=${NETUID:-100}
       - RPC_PORT=8080
-      - P2P_PORT=8090
+      - P2P_PORT=${P2P_PORT:-8090}
       - WITH_BOOTNODE=${WITH_BOOTNODE:-true}
-      - BOOTNODE_PORT=8090
+      - BOOTNODE_PORT=${P2P_PORT:-8090}
 
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]

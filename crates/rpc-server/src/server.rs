@@ -428,13 +428,57 @@ async fn challenge_route_handler(
         } else {
             None
         }
-    })
-    // Fallback: try Bearer session token
-    .or_else(|| {
-        let token = crate::auth::extract_bearer_token(&headers_map)?;
-        let info = crate::auth::verify_bearer_token(&token).ok()?;
-        Some(info.hotkey_hex)
     });
+
+    // Fallback: try ephemeral session token (Authorization: Session ...)
+    // Each request is uniquely signed with the session private key.
+    // Validators cannot forge requests - they don't have the ephemeral key.
+    let auth_hotkey = if auth_hotkey.is_some() {
+        auth_hotkey
+    } else if let Some(token) = crate::auth::extract_session_token(&headers_map) {
+        // Verify the per-request signature
+        match crate::auth::verify_session_token(&token, &method, &path, &body_bytes) {
+            Ok(info) => {
+                // Resolve session pubkey -> hotkey via auth WASM challenge
+                let maybe_handler = handler.route_handler.read().clone();
+                if let Some(ref handle) = maybe_handler {
+                    let verify_body = serde_json::json!({
+                        "session_pubkey": info.session_pubkey_hex
+                    });
+                    let verify_req = RouteRequest {
+                        method: "POST".to_string(),
+                        path: "/verify".to_string(),
+                        params: HashMap::new(),
+                        query: HashMap::new(),
+                        headers: HashMap::new(),
+                        body: verify_body,
+                        auth_hotkey: None,
+                    };
+                    // Call auth challenge to resolve session key
+                    let resp = handle("auth".to_string(), verify_req).await;
+                    if resp.status == 200 {
+                        resp.body
+                            .get("valid")
+                            .and_then(|v| v.as_bool())
+                            .filter(|v| *v)
+                            .and_then(|_| {
+                                resp.body
+                                    .get("hotkey")
+                                    .and_then(|h| h.as_str())
+                                    .map(|h| h.to_string())
+                            })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
 
     // Enforce auth on routes that require it
     if route.requires_auth && auth_hotkey.is_none() {

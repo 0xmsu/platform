@@ -197,59 +197,74 @@ fn canonicalize_json_value(value: &serde_json::Value) -> String {
     }
 }
 
-/// Parse and verify a Bearer session token.
+/// Verify a session token from the Authorization header.
 ///
-/// Token format: `{hotkey_hex}:{expiry_ms}:{nonce}:{signature_hex}`
-/// Signed message: `session:{hotkey_ss58}:{expiry_ms}:{nonce}`
+/// Token format: `{session_pubkey_hex}:{timestamp}:{nonce}:{signature_hex}`
 ///
-/// Returns the hotkey hex string if the token is valid.
-/// Does NOT check revocation (that requires a WASM call to the auth challenge).
-pub fn verify_bearer_token(token: &str) -> Result<BearerTokenInfo, AuthError> {
+/// The signature is over:
+///   `{method}:{path}:{body_hash}:{timestamp}:{nonce}`
+///
+/// The session_pubkey is an ephemeral sr25519 public key registered via
+/// the auth challenge `/login`. The RPC verifies the signature, then calls
+/// the auth WASM challenge `/verify` to resolve the hotkey and check revocation.
+///
+/// Validators cannot forge requests because they don't have the ephemeral
+/// private key. Each request has a unique signature (timestamp + nonce).
+pub fn verify_session_token(
+    token: &str,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<SessionTokenInfo, AuthError> {
     let parts: Vec<&str> = token.splitn(4, ':').collect();
     if parts.len() != 4 {
         return Err(AuthError::InvalidSignature);
     }
 
-    let hotkey_hex = parts[0];
-    let expiry_str = parts[1];
+    let session_pubkey_hex = parts[0];
+    let timestamp_str = parts[1];
     let nonce = parts[2];
     let signature_hex = parts[3];
 
-    // Parse hotkey
-    let hotkey = Hotkey::from_hex(hotkey_hex).ok_or(AuthError::InvalidHotkey)?;
+    // Validate session pubkey format (64 hex chars = 32 bytes)
+    if session_pubkey_hex.len() != 64 {
+        return Err(AuthError::InvalidHotkey);
+    }
 
-    // Parse expiry
-    let expiry: i64 = expiry_str.parse().map_err(|_| AuthError::InvalidNonce)?;
-
-    // Check expiry
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    if now_ms > expiry {
+    // Parse timestamp and check freshness (5 min window)
+    let timestamp: i64 = timestamp_str.parse().map_err(|_| AuthError::InvalidNonce)?;
+    if !verify_timestamp(timestamp) {
         return Err(AuthError::MessageExpired);
     }
 
-    // Verify signature
-    let hotkey_ss58 = hotkey.to_ss58();
-    let message = format!("session:{}:{}:{}", hotkey_ss58, expiry, nonce);
+    // Build the signed message and verify
+    let body_hash = {
+        let canonical = if let Ok(val) = serde_json::from_slice::<serde_json::Value>(body) {
+            canonicalize_json_value(&val).into_bytes()
+        } else {
+            body.to_vec()
+        };
+        hex::encode(Sha256::digest(&canonical))
+    };
 
-    match verify_validator_signature(hotkey_hex, &message, signature_hex)? {
-        true => Ok(BearerTokenInfo {
-            hotkey_hex: hotkey_hex.to_string(),
-            expiry,
-            nonce: nonce.to_string(),
+    let message = format!("{}:{}:{}:{}:{}", method, path, body_hash, timestamp, nonce);
+
+    match verify_validator_signature(session_pubkey_hex, &message, signature_hex)? {
+        true => Ok(SessionTokenInfo {
+            session_pubkey_hex: session_pubkey_hex.to_string(),
         }),
         false => Err(AuthError::VerificationFailed),
     }
 }
 
-/// Parsed and verified bearer token info.
-pub struct BearerTokenInfo {
-    pub hotkey_hex: String,
-    pub expiry: i64,
-    pub nonce: String,
+/// Parsed and verified session token info.
+pub struct SessionTokenInfo {
+    pub session_pubkey_hex: String,
 }
 
-/// Extract Bearer token from Authorization header.
-pub fn extract_bearer_token(headers: &HashMap<String, String>) -> Option<String> {
+/// Extract session token from Authorization header.
+/// Supports: `Authorization: Session {token}`
+pub fn extract_session_token(headers: &HashMap<String, String>) -> Option<String> {
     let headers_lower: HashMap<String, String> = headers
         .iter()
         .map(|(k, v)| (k.to_lowercase(), v.clone()))
@@ -258,8 +273,8 @@ pub fn extract_bearer_token(headers: &HashMap<String, String>) -> Option<String>
     headers_lower
         .get("authorization")
         .and_then(|v| {
-            v.strip_prefix("Bearer ")
-                .or_else(|| v.strip_prefix("bearer "))
+            v.strip_prefix("Session ")
+                .or_else(|| v.strip_prefix("session "))
         })
         .map(|t| t.trim().to_string())
 }

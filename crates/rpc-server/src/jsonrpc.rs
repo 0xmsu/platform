@@ -319,6 +319,9 @@ impl RpcHandler {
             ["epoch", "current"] => self.epoch_current(req.id),
             ["epoch", "getPhase"] => self.epoch_get_phase(req.id),
 
+            // Subnet namespace
+            ["subnet", "getWeights"] => self.subnet_get_weights(req.id),
+
             // Leaderboard namespace
             ["leaderboard", "get"] => self.leaderboard_get(req.id, req.params),
 
@@ -376,6 +379,8 @@ impl RpcHandler {
                     "job_list", "job_get",
                     // Epoch
                     "epoch_current", "epoch_getPhase",
+                    // Subnet
+                    "subnet_getWeights",
                     // Leaderboard
                     "leaderboard_get",
                     // Evaluation
@@ -1449,6 +1454,43 @@ impl RpcHandler {
         };
 
         JsonRpcResponse::result(id, json!(phase))
+    }
+
+    // ==================== Subnet Namespace ====================
+
+    fn subnet_get_weights(&self, id: Value) -> JsonRpcResponse {
+        let chain = self.chain_state.read();
+        let weights = &chain.last_computed_weights;
+
+        if weights.is_empty() {
+            return JsonRpcResponse::result(
+                id,
+                json!({
+                    "weights": [],
+                    "message": "No weights computed yet. Weights are calculated at each commit window."
+                }),
+            );
+        }
+
+        let entries: Vec<Value> = weights
+            .iter()
+            .map(|(mechanism_id, uids, vals)| {
+                let pairs: Vec<Value> = uids
+                    .iter()
+                    .zip(vals.iter())
+                    .map(|(uid, val)| json!({"uid": uid, "weight": val}))
+                    .collect();
+                let total: u64 = vals.iter().map(|v| *v as u64).sum();
+                json!({
+                    "mechanismId": mechanism_id,
+                    "entries": pairs,
+                    "totalWeight": total,
+                    "count": uids.len(),
+                })
+            })
+            .collect();
+
+        JsonRpcResponse::result(id, json!({ "weights": entries }))
     }
 
     // ==================== Leaderboard Namespace ====================

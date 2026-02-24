@@ -163,6 +163,7 @@ impl ChainStateV1 {
             pause_reason: None,
             mutation_sequence: 0,
             llm_capable_validators: HashSet::new(),
+            last_computed_weights: Vec::new(),
         }
     }
 }
@@ -218,6 +219,7 @@ impl ChainStateV2 {
             pause_reason: None,
             mutation_sequence: 0,
             llm_capable_validators: HashSet::new(),
+            last_computed_weights: Vec::new(),
         }
     }
 }
