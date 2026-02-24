@@ -356,6 +356,7 @@ async fn challenge_route_handler(
             .unwrap_or_default()
     };
 
+    let original_challenge_id = challenge_id;
     let challenge_id = resolved_id;
 
     if challenge_routes.is_empty() {
@@ -404,15 +405,30 @@ async fn challenge_route_handler(
         }
     }
 
-    // Verify authentication from headers if present
+    // Verify authentication from headers if present.
+    // Try with the original challenge_id (name) first, then the resolved UUID,
+    // so clients can sign with either the name or the UUID.
     let body_bytes = if body.is_null() {
         Vec::new()
     } else {
         serde_json::to_vec(&body).unwrap_or_default()
     };
-    let auth_hotkey =
-        crate::auth::verify_route_auth(&headers_map, &challenge_id, &method, &path, &body_bytes)
-            .ok();
+    let auth_hotkey = crate::auth::verify_route_auth(
+        &headers_map,
+        &original_challenge_id,
+        &method,
+        &path,
+        &body_bytes,
+    )
+    .ok()
+    .or_else(|| {
+        if original_challenge_id != challenge_id {
+            crate::auth::verify_route_auth(&headers_map, &challenge_id, &method, &path, &body_bytes)
+                .ok()
+        } else {
+            None
+        }
+    });
 
     // Enforce auth on routes that require it
     if route.requires_auth && auth_hotkey.is_none() {
