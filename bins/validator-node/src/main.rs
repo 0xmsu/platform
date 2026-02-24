@@ -972,7 +972,26 @@ async fn main() -> Result<()> {
     let mut wasm_eval_interval = tokio::time::interval(Duration::from_secs(5));
     let mut stale_job_interval = tokio::time::interval(Duration::from_secs(120));
     let mut weight_check_interval = tokio::time::interval(Duration::from_secs(30));
-    let mut last_weight_submission_epoch: u64 = 0;
+    // Initialize to current epoch if we may have already submitted this epoch
+    // (e.g., after a restart mid-epoch). This prevents 1010 errors from subtensor
+    // rejecting duplicate commits. We'll submit on the NEXT epoch boundary.
+    let mut last_weight_submission_epoch: u64 = if let Some(ref st) = subtensor {
+        match st.get_current_block().await {
+            Ok(block) => {
+                let tempo = 360u64;
+                let netuid_plus_one = (netuid as u64).saturating_add(1);
+                let epoch = block.saturating_add(netuid_plus_one) / (tempo + 1);
+                info!("Initializing last_weight_submission_epoch to current epoch {} (block {}) to avoid duplicate commits after restart", epoch, block);
+                epoch
+            }
+            Err(e) => {
+                warn!("Could not fetch current block for epoch init: {}", e);
+                0
+            }
+        }
+    } else {
+        0
+    };
     let startup_rpc_precompute_delay = tokio::time::sleep(Duration::from_secs(70));
     tokio::pin!(startup_rpc_precompute_delay);
     let mut startup_rpc_precomputed = false;

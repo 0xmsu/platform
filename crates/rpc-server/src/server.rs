@@ -1498,10 +1498,7 @@ async fn sudo_storage_handler(
 
     match request.op.as_str() {
         "get" => {
-            let sk = StorageKey::new(
-                &request.namespace,
-                hex::decode(&request.key).unwrap_or_default(),
-            );
+            let sk = StorageKey::new(&request.namespace, &request.key);
             match storage.get(&sk, GetOptions::default()).await {
                 Ok(Some(val)) => {
                     let value_b64 = base64::engine::general_purpose::STANDARD.encode(&val.data);
@@ -1530,8 +1527,7 @@ async fn sudo_storage_handler(
         }
 
         "put" => {
-            let key_bytes = hex::decode(&request.key).unwrap_or_default();
-            let sk = StorageKey::new(&request.namespace, &key_bytes);
+            let sk = StorageKey::new(&request.namespace, &request.key);
 
             // Auto-snapshot the old value before overwriting
             let old_value = storage.get(&sk, GetOptions::default()).await.ok().flatten();
@@ -1579,8 +1575,7 @@ async fn sudo_storage_handler(
         }
 
         "delete" => {
-            let key_bytes = hex::decode(&request.key).unwrap_or_default();
-            let sk = StorageKey::new(&request.namespace, &key_bytes);
+            let sk = StorageKey::new(&request.namespace, &request.key);
             match storage.delete(&sk).await {
                 Ok(deleted) => {
                     info!(
@@ -1656,8 +1651,7 @@ async fn sudo_storage_handler(
 
             let mut entries = Vec::new();
             for entry in &request.keys {
-                let key_bytes = hex::decode(&entry.key).unwrap_or_default();
-                let sk = StorageKey::new(&entry.namespace, &key_bytes);
+                let sk = StorageKey::new(&entry.namespace, &entry.key);
                 let val = storage
                     .get(&sk, GetOptions::default())
                     .await
@@ -1713,8 +1707,7 @@ async fn sudo_storage_handler(
             let mut errors = 0u32;
 
             for (namespace, key, old_value) in &entries {
-                let key_bytes = hex::decode(key).unwrap_or_default();
-                let sk = StorageKey::new(namespace, &key_bytes);
+                let sk = StorageKey::new(namespace, key);
                 match old_value {
                     Some(val) => {
                         if storage
