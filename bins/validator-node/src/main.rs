@@ -953,7 +953,7 @@ async fn main() -> Result<()> {
     let mut wasm_eval_interval = tokio::time::interval(Duration::from_secs(5));
     let mut stale_job_interval = tokio::time::interval(Duration::from_secs(120));
     let mut weight_check_interval = tokio::time::interval(Duration::from_secs(30));
-    let mut last_weight_submission_epoch: u64 = 0; // Local tracking of weight submissions
+    let _last_weight_submission_epoch: u64 = 0; // Weights now submitted via CommitWindowOpen
     let mut challenge_sync_interval = tokio::time::interval(Duration::from_secs(30)); // Check every 30s
     let mut last_sync_block: u64 = 0;
     let sync_block_interval: u64 = 1; // Call WASM sync every block, WASM decides frequency internally
@@ -1506,57 +1506,12 @@ async fn main() -> Result<()> {
                 state_manager.apply(|state| state.cleanup_old_proposals(300_000));
             }
 
-            // Weight submission check - submit at epoch boundaries (block % 360 == 0)
+            // Weight submission is handled entirely by CommitWindowOpen in handle_block_event.
+            // The old weight_check_interval was redundant and overwrote WASM-computed weights
+            // with burn weights because it couldn't see them in finalize_weights() after
+            // the CommitWindowOpen handler already consumed them.
             _ = weight_check_interval.tick() => {
-                let current_block = state_manager.apply(|state| state.bittensor_block);
-                let current_epoch = current_block / 360;
-
-                // Submit weights if we're at an epoch boundary and haven't submitted for this epoch
-                // Check within first 30 blocks of epoch to catch up if we missed
-                if current_epoch > last_weight_submission_epoch && current_block % 360 < 30 {
-                    info!(
-                        "Weight submission due: block={}, epoch={}, last_submitted={}",
-                        current_block, current_epoch, last_weight_submission_epoch
-                    );
-
-                    if let (Some(st), Some(sig)) = (subtensor.as_ref(), subtensor_signer.as_ref()) {
-                        let mechanism_id = {
-                            let cs = chain_state.read();
-                            cs.mechanism_configs.keys().next().copied().unwrap_or(0u8)
-                        };
-
-                        let final_weights = state_manager.apply(|state| state.finalize_weights());
-
-                        match final_weights {
-                            Some(weights) if !weights.is_empty() => {
-                                let uids: Vec<u16> = weights.iter().map(|(uid, _)| *uid).collect();
-                                let vals: Vec<u16> = weights.iter().map(|(_, w)| *w).collect();
-
-                                info!("Submitting {} weights for epoch {}", uids.len(), current_epoch);
-                                match st.set_mechanism_weights(sig, netuid, mechanism_id, &uids, &vals, version_key, ExtrinsicWait::Finalized).await {
-                                    Ok(resp) if resp.success => {
-                                        info!("Weights submitted for epoch {}: {:?}", current_epoch, resp.tx_hash);
-                                        last_weight_submission_epoch = current_epoch;
-                                    }
-                                    Ok(resp) => warn!("Weight submission issue: {}", resp.message),
-                                    Err(e) => error!("Weight submission failed: {}", e),
-                                }
-                            }
-                            _ => {
-                                // No challenge weights - submit burn weights
-                                info!("No weights for epoch {}, submitting burn weights", current_epoch);
-                                match st.set_mechanism_weights(sig, netuid, mechanism_id, &[0u16], &[65535u16], version_key, ExtrinsicWait::Finalized).await {
-                                    Ok(resp) if resp.success => {
-                                        info!("Burn weights submitted for epoch {}: {:?}", current_epoch, resp.tx_hash);
-                                        last_weight_submission_epoch = current_epoch;
-                                    }
-                                    Ok(resp) => warn!("Burn weight submission issue: {}", resp.message),
-                                    Err(e) => error!("Burn weight submission failed: {}", e),
-                                }
-                            }
-                        }
-                    }
-                }
+                // No-op: weights are submitted in CommitWindowOpen via CRv4
             }
 
             // Periodic checkpoint
