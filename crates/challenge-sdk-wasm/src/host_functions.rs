@@ -311,6 +311,8 @@ extern "C" {
     fn consensus_get_submission_count() -> i32;
     fn consensus_get_block_height() -> i64;
     fn consensus_get_subnet_challenges(buf_ptr: i32, buf_len: i32) -> i32;
+    fn consensus_get_llm_validators(buf_ptr: i32, buf_len: i32) -> i32;
+    fn consensus_get_registered_hotkeys(buf_ptr: i32, buf_len: i32) -> i32;
 }
 
 pub fn host_consensus_get_epoch() -> i64 {
@@ -366,6 +368,31 @@ pub fn host_consensus_get_subnet_challenges() -> Result<Vec<u8>, i32> {
     let mut buf = vec![0u8; RESPONSE_BUF_MEDIUM];
     let status =
         unsafe { consensus_get_subnet_challenges(buf.as_mut_ptr() as i32, buf.len() as i32) };
+    if status < 0 {
+        return Err(status);
+    }
+    buf.truncate(status as usize);
+    Ok(buf)
+}
+
+/// Get the list of validators that have LLM capability (Chutes API key).
+/// Returns JSON-encoded list of hotkey strings.
+pub fn host_consensus_get_llm_validators() -> Result<Vec<u8>, i32> {
+    let mut buf = vec![0u8; RESPONSE_BUF_MEDIUM];
+    let status = unsafe { consensus_get_llm_validators(buf.as_mut_ptr() as i32, buf.len() as i32) };
+    if status < 0 {
+        return Err(status);
+    }
+    buf.truncate(status as usize);
+    Ok(buf)
+}
+
+/// Get the list of all registered hotkeys from the subnet metagraph.
+/// Returns JSON-encoded list of hotkey strings.
+pub fn host_consensus_get_registered_hotkeys() -> Result<Vec<u8>, i32> {
+    let mut buf = vec![0u8; RESPONSE_BUF_MEDIUM];
+    let status =
+        unsafe { consensus_get_registered_hotkeys(buf.as_mut_ptr() as i32, buf.len() as i32) };
     if status < 0 {
         return Err(status);
     }

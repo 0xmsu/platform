@@ -27,6 +27,8 @@ pub const HOST_CONSENSUS_GET_STATE_HASH: &str = "consensus_get_state_hash";
 pub const HOST_CONSENSUS_GET_SUBMISSION_COUNT: &str = "consensus_get_submission_count";
 pub const HOST_CONSENSUS_GET_BLOCK_HEIGHT: &str = "consensus_get_block_height";
 pub const HOST_CONSENSUS_GET_SUBNET_CHALLENGES: &str = "consensus_get_subnet_challenges";
+pub const HOST_CONSENSUS_GET_LLM_VALIDATORS: &str = "consensus_get_llm_validators";
+pub const HOST_CONSENSUS_GET_REGISTERED_HOTKEYS: &str = "consensus_get_registered_hotkeys";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -109,6 +111,10 @@ pub struct ConsensusState {
     pub challenge_id: String,
     pub validator_id: String,
     pub subnet_challenges: Vec<u8>,
+    /// JSON-encoded list of validator hotkeys with LLM capability
+    pub llm_validators_json: Vec<u8>,
+    /// JSON-encoded list of all registered hotkeys from metagraph
+    pub registered_hotkeys_json: Vec<u8>,
 }
 
 impl ConsensusState {
@@ -126,6 +132,8 @@ impl ConsensusState {
             challenge_id,
             validator_id,
             subnet_challenges: Vec::new(),
+            llm_validators_json: Vec::new(),
+            registered_hotkeys_json: Vec::new(),
         }
     }
 
@@ -222,6 +230,26 @@ impl HostFunctionRegistrar for ConsensusHostFunctions {
                 HOST_CONSENSUS_GET_SUBNET_CHALLENGES,
                 |mut caller: Caller<RuntimeState>, buf_ptr: i32, buf_len: i32| -> i32 {
                     handle_get_subnet_challenges(&mut caller, buf_ptr, buf_len)
+                },
+            )
+            .map_err(|err| WasmRuntimeError::HostFunction(err.to_string()))?;
+
+        linker
+            .func_wrap(
+                HOST_CONSENSUS_NAMESPACE,
+                HOST_CONSENSUS_GET_LLM_VALIDATORS,
+                |mut caller: Caller<RuntimeState>, buf_ptr: i32, buf_len: i32| -> i32 {
+                    handle_get_llm_validators(&mut caller, buf_ptr, buf_len)
+                },
+            )
+            .map_err(|err| WasmRuntimeError::HostFunction(err.to_string()))?;
+
+        linker
+            .func_wrap(
+                HOST_CONSENSUS_NAMESPACE,
+                HOST_CONSENSUS_GET_REGISTERED_HOTKEYS,
+                |mut caller: Caller<RuntimeState>, buf_ptr: i32, buf_len: i32| -> i32 {
+                    handle_get_registered_hotkeys(&mut caller, buf_ptr, buf_len)
                 },
             )
             .map_err(|err| WasmRuntimeError::HostFunction(err.to_string()))?;
@@ -370,6 +398,52 @@ fn handle_get_subnet_challenges(
         return ConsensusHostStatus::InternalError.to_i32();
     }
 
+    data.len() as i32
+}
+
+fn handle_get_llm_validators(caller: &mut Caller<RuntimeState>, buf_ptr: i32, buf_len: i32) -> i32 {
+    let data = {
+        let state = &caller.data().consensus_state;
+        if !state.policy.enabled {
+            return ConsensusHostStatus::Disabled.to_i32();
+        }
+        state.llm_validators_json.clone()
+    };
+    if data.is_empty() {
+        return 0;
+    }
+    if buf_len < 0 || (data.len() as i32) > buf_len {
+        return ConsensusHostStatus::BufferTooSmall.to_i32();
+    }
+    if let Err(err) = write_wasm_memory(caller, buf_ptr, &data) {
+        warn!(error = %err, "consensus_get_llm_validators: failed to write to wasm memory");
+        return ConsensusHostStatus::InternalError.to_i32();
+    }
+    data.len() as i32
+}
+
+fn handle_get_registered_hotkeys(
+    caller: &mut Caller<RuntimeState>,
+    buf_ptr: i32,
+    buf_len: i32,
+) -> i32 {
+    let data = {
+        let state = &caller.data().consensus_state;
+        if !state.policy.enabled {
+            return ConsensusHostStatus::Disabled.to_i32();
+        }
+        state.registered_hotkeys_json.clone()
+    };
+    if data.is_empty() {
+        return 0;
+    }
+    if buf_len < 0 || (data.len() as i32) > buf_len {
+        return ConsensusHostStatus::BufferTooSmall.to_i32();
+    }
+    if let Err(err) = write_wasm_memory(caller, buf_ptr, &data) {
+        warn!(error = %err, "consensus_get_registered_hotkeys: failed to write to wasm memory");
+        return ConsensusHostStatus::InternalError.to_i32();
+    }
     data.len() as i32
 }
 

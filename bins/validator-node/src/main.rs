@@ -660,6 +660,13 @@ async fn main() -> Result<()> {
 
     // Cast storage to trait object for WASM executor
     let storage_dyn: Arc<dyn DistributedStore> = Arc::clone(&storage) as Arc<dyn DistributedStore>;
+
+    // Shared chain state data for WASM instances
+    let shared_llm_validators_json: Arc<parking_lot::RwLock<Vec<u8>>> =
+        Arc::new(parking_lot::RwLock::new(Vec::new()));
+    let shared_registered_hotkeys_json: Arc<parking_lot::RwLock<Vec<u8>>> =
+        Arc::new(parking_lot::RwLock::new(Vec::new()));
+
     let wasm_executor = match WasmChallengeExecutor::new(WasmExecutorConfig {
         module_dir: wasm_module_dir.clone(),
         max_memory_bytes: args.wasm_max_memory,
@@ -674,6 +681,8 @@ async fn main() -> Result<()> {
         )),
         chutes_api_key: args.chutes_api_key.clone(),
         distributed_storage: Some(storage_dyn),
+        llm_validators_json: Arc::clone(&shared_llm_validators_json),
+        registered_hotkeys_json: Arc::clone(&shared_registered_hotkeys_json),
     }) {
         Ok(executor) => {
             info!(
@@ -985,6 +994,8 @@ async fn main() -> Result<()> {
                     &p2p_cmd_tx,
                     &chain_state,
                     &challenge_last_sync,
+                    &shared_llm_validators_json,
+                    &shared_registered_hotkeys_json,
                 ).await;
             }
 
@@ -1368,6 +1379,9 @@ async fn main() -> Result<()> {
                         stake: our_stake,
                         timestamp: chrono::Utc::now().timestamp_millis(),
                         signature: vec![], // Will be signed by P2P layer
+                        capabilities: platform_p2p_consensus::ValidatorCapabilities {
+                            has_llm: args.chutes_api_key.is_some(),
+                        },
                     });
 
                     if let Err(e) = p2p_broadcast_tx.send(platform_p2p_consensus::P2PCommand::Broadcast(heartbeat)).await {
@@ -1844,6 +1858,8 @@ async fn handle_network_event(
     p2p_cmd_tx: &tokio::sync::mpsc::Sender<platform_p2p_consensus::P2PCommand>,
     chain_state: &Arc<RwLock<platform_core::ChainState>>,
     challenge_last_sync: &Arc<RwLock<std::collections::HashMap<platform_core::ChallengeId, u64>>>,
+    shared_llm_validators_json: &Arc<parking_lot::RwLock<Vec<u8>>>,
+    shared_registered_hotkeys_json: &Arc<parking_lot::RwLock<Vec<u8>>>,
 ) {
     match event {
         NetworkEvent::Message { source, message } => match message {
@@ -1931,6 +1947,33 @@ async fn handle_network_event(
                     state
                         .validators
                         .insert(hb.validator.clone(), validator_info);
+
+                    // Track LLM-capable validators
+                    if hb.capabilities.has_llm {
+                        state.llm_capable_validators.insert(hb.validator.clone());
+                    } else {
+                        state.llm_capable_validators.remove(&hb.validator);
+                    }
+
+                    // Update shared WASM-accessible chain state
+                    if let Ok(json) = serde_json::to_vec(
+                        &state
+                            .llm_capable_validators
+                            .iter()
+                            .map(|h| h.to_ss58())
+                            .collect::<Vec<_>>(),
+                    ) {
+                        *shared_llm_validators_json.write() = json;
+                    }
+                    if let Ok(json) = serde_json::to_vec(
+                        &state
+                            .registered_hotkeys
+                            .iter()
+                            .map(|h| h.to_ss58())
+                            .collect::<Vec<_>>(),
+                    ) {
+                        *shared_registered_hotkeys_json.write() = json;
+                    }
 
                     // Check core state hash divergence
                     let our_core_hash = state.state_hash;
@@ -3626,8 +3669,12 @@ async fn handle_block_event(
                     }
                 }
 
-                // Submit weights (or burn if none)
-                let weights_to_submit = if mechanism_weights.is_empty() {
+                // Deduplicate by mechanism_id: pick the best (most UIDs) entry per
+                // mechanism to avoid nonce conflicts from multiple submissions.
+                // Burn-only entries (single UID 0) are used only if no real weights exist.
+                let weights_to_submit: Vec<(u8, Vec<u16>, Vec<u16>)> = if mechanism_weights
+                    .is_empty()
+                {
                     let mechanism_id = {
                         let cs = chain_state.read();
                         cs.mechanism_configs.keys().next().copied().unwrap_or(0u8)
@@ -3635,7 +3682,48 @@ async fn handle_block_event(
                     info!("No weights - submitting burn weights to UID 0");
                     vec![(mechanism_id, vec![0u16], vec![65535u16])]
                 } else {
-                    mechanism_weights
+                    use std::collections::HashMap;
+                    let mut best_per_mechanism: HashMap<u8, (Vec<u16>, Vec<u16>)> = HashMap::new();
+                    for (mid, uids, vals) in &mechanism_weights {
+                        let is_burn_only = uids.len() == 1 && uids[0] == 0;
+                        let existing = best_per_mechanism.get(mid);
+                        let replace = match existing {
+                            None => true,
+                            Some((ex_uids, _)) => {
+                                let ex_is_burn = ex_uids.len() == 1 && ex_uids[0] == 0;
+                                // Prefer real weights over burn; among real, prefer more UIDs
+                                if is_burn_only && !ex_is_burn {
+                                    false
+                                } else if !is_burn_only && ex_is_burn {
+                                    true
+                                } else {
+                                    uids.len() > ex_uids.len()
+                                }
+                            }
+                        };
+                        if replace {
+                            best_per_mechanism.insert(*mid, (uids.clone(), vals.clone()));
+                        }
+                    }
+                    let mut result = Vec::new();
+                    for (mid, (uids, vals)) in best_per_mechanism {
+                        info!(
+                            "Selected weights for mechanism {}: {} UIDs",
+                            mid,
+                            uids.len()
+                        );
+                        debug!("  UIDs: {:?}, Weights: {:?}", uids, vals);
+                        result.push((mid, uids, vals));
+                    }
+                    if result.is_empty() {
+                        let mechanism_id = {
+                            let cs = chain_state.read();
+                            cs.mechanism_configs.keys().next().copied().unwrap_or(0u8)
+                        };
+                        vec![(mechanism_id, vec![0u16], vec![65535u16])]
+                    } else {
+                        result
+                    }
                 };
 
                 for (mechanism_id, uids, weights) in weights_to_submit {

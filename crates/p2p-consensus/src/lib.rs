@@ -54,7 +54,8 @@ pub use messages::{
     StateChangeType, StateMutationProposalMessage, StateMutationType, StateMutationVoteMessage,
     StateRequest, StateResponse, StorageProposalMessage, StorageRootSyncMessage, StorageSyncEntry,
     StorageSyncRequestMessage, StorageSyncResponseMessage, StorageVoteMessage, SubmissionMessage,
-    TaskProgressMessage, TaskResultMessage, ViewChangeMessage, ViewNumber, WeightVoteMessage,
+    TaskProgressMessage, TaskResultMessage, ValidatorCapabilities, ViewChangeMessage, ViewNumber,
+    WeightVoteMessage,
 };
 pub use network::{
     CombinedBehaviour, CombinedEvent, NetworkBehaviour, NetworkError, NetworkEvent, NetworkRunner,

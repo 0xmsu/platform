@@ -137,6 +137,10 @@ pub struct InstanceConfig {
     pub block_height: u64,
     /// Current epoch for consensus tracking.
     pub epoch: u64,
+    /// JSON-encoded list of validators with LLM capability
+    pub llm_validators_json: Vec<u8>,
+    /// JSON-encoded list of all registered hotkeys from metagraph
+    pub registered_hotkeys_json: Vec<u8>,
 }
 
 impl Default for InstanceConfig {
@@ -163,6 +167,8 @@ impl Default for InstanceConfig {
             llm_policy: LlmPolicy::default(),
             block_height: 0,
             epoch: 0,
+            llm_validators_json: Vec::new(),
+            registered_hotkeys_json: Vec::new(),
         }
     }
 }
@@ -354,6 +360,8 @@ impl WasmRuntime {
         );
         consensus_state.block_height = instance_config.block_height;
         consensus_state.epoch = instance_config.epoch;
+        consensus_state.llm_validators_json = instance_config.llm_validators_json.clone();
+        consensus_state.registered_hotkeys_json = instance_config.registered_hotkeys_json.clone();
         let terminal_state = TerminalState::new(
             instance_config.terminal_policy.clone(),
             instance_config.challenge_id.clone(),

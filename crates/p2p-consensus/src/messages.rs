@@ -432,6 +432,17 @@ pub struct HeartbeatMessage {
     pub timestamp: i64,
     /// Signature
     pub signature: Vec<u8>,
+    /// Validator capabilities (e.g. LLM inference available)
+    #[serde(default)]
+    pub capabilities: ValidatorCapabilities,
+}
+
+/// Capabilities announced by a validator in heartbeats
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ValidatorCapabilities {
+    /// Whether this validator has a Chutes API key for LLM inference
+    #[serde(default)]
+    pub has_llm: bool,
 }
 
 /// Peer announcement for discovery
@@ -894,6 +905,7 @@ mod tests {
             stake: 1_000_000_000_000,
             timestamp: 1234567890,
             signature: vec![0u8; 64],
+            capabilities: Default::default(),
         });
 
         let bytes = msg.to_bytes().expect("serialization should work");
@@ -926,6 +938,7 @@ mod tests {
             stake: 0,
             timestamp: 0,
             signature: vec![],
+            capabilities: Default::default(),
         });
         assert_eq!(heartbeat.type_name(), "Heartbeat");
     }
@@ -971,6 +984,7 @@ mod tests {
                 stake: 0,
                 timestamp: 0,
                 signature: vec![],
+                capabilities: Default::default(),
             }),
             signer: Hotkey([1u8; 32]),
             signature: vec![],

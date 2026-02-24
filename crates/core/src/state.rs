@@ -206,6 +206,10 @@ pub struct ChainState {
     /// Monotonic mutation sequence number for deterministic ordering
     #[serde(default)]
     pub mutation_sequence: u64,
+
+    /// Validators that have announced LLM inference capability (Chutes API key)
+    #[serde(default, with = "hotkey_set_serde")]
+    pub llm_capable_validators: std::collections::HashSet<Hotkey>,
 }
 
 /// Route information for a challenge
@@ -242,6 +246,7 @@ impl Default for ChainState {
             paused: false,
             pause_reason: None,
             mutation_sequence: 0,
+            llm_capable_validators: std::collections::HashSet::new(),
         }
     }
 }
@@ -268,6 +273,7 @@ impl ChainState {
             paused: false,
             pause_reason: None,
             mutation_sequence: 0,
+            llm_capable_validators: std::collections::HashSet::new(),
         };
         state.update_hash();
         state

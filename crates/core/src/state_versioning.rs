@@ -162,6 +162,7 @@ impl ChainStateV1 {
             paused: false,
             pause_reason: None,
             mutation_sequence: 0,
+            llm_capable_validators: HashSet::new(),
         }
     }
 }
@@ -216,6 +217,7 @@ impl ChainStateV2 {
             paused: false,
             pause_reason: None,
             mutation_sequence: 0,
+            llm_capable_validators: HashSet::new(),
         }
     }
 }

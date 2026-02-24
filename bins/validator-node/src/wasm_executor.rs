@@ -27,6 +27,10 @@ pub struct WasmExecutorConfig {
     pub chutes_api_key: Option<String>,
     /// Optional distributed storage for loading WASM modules
     pub distributed_storage: Option<Arc<dyn platform_distributed_storage::DistributedStore>>,
+    /// Shared chain state: LLM-capable validators (JSON bytes)
+    pub llm_validators_json: Arc<parking_lot::RwLock<Vec<u8>>>,
+    /// Shared chain state: registered hotkeys (JSON bytes)
+    pub registered_hotkeys_json: Arc<parking_lot::RwLock<Vec<u8>>>,
 }
 
 impl std::fmt::Debug for WasmExecutorConfig {
@@ -55,6 +59,8 @@ impl Default for WasmExecutorConfig {
             storage_backend: Arc::new(InMemoryStorageBackend::new()),
             chutes_api_key: None,
             distributed_storage: None,
+            llm_validators_json: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            registered_hotkeys_json: Arc::new(parking_lot::RwLock::new(Vec::new())),
         }
     }
 }
@@ -780,6 +786,8 @@ impl WasmChallengeExecutor {
                 Some(key) => LlmPolicy::with_api_key(key.clone()),
                 None => LlmPolicy::default(),
             },
+            llm_validators_json: self.config.llm_validators_json.read().clone(),
+            registered_hotkeys_json: self.config.registered_hotkeys_json.read().clone(),
             ..Default::default()
         };
 
