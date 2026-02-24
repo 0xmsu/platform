@@ -59,6 +59,15 @@ impl Default for PlatformConfig {
                 auto_update: true,
             },
         );
+        challenges.insert(
+            "term-challenge".to_string(),
+            ChallengeConfig {
+                github_repo: "PlatformNetwork/term-challenge".to_string(),
+                binary_name: "term-cli".to_string(),
+                command_alias: "term".to_string(),
+                auto_update: true,
+            },
+        );
         Self {
             network: NetworkConfig {
                 rpc_endpoint: "wss://chain.platform.network".to_string(),
