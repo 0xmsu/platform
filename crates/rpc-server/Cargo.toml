@@ -8,6 +8,7 @@ description = "HTTP RPC server for Mini-Chain validators"
 platform-core = { path = "../core" }
 platform-challenge-sdk = { path = "../challenge-sdk" }
 platform-subnet-manager = { path = "../subnet-manager" }
+platform-distributed-storage = { path = "../distributed-storage" }
 
 # HTTP Server
 axum = { version = "0.7", features = ["json", "tokio"] }

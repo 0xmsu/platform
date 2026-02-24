@@ -5671,6 +5671,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "platform-challenge-sdk",
  "platform-core",
+ "platform-distributed-storage",
  "platform-subnet-manager",
  "reqwest 0.12.25",
  "serde",

@@ -742,6 +742,9 @@ async fn main() -> Result<()> {
             chain_state.clone(),
             bans.clone(),
             rpc_p2p_tx.clone(),
+        )
+        .with_storage(
+            Arc::clone(&storage) as Arc<dyn platform_distributed_storage::DistributedStore>
         );
 
         // Configure WASM route handler if executor is available

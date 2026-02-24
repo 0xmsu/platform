@@ -13,6 +13,7 @@ use base64::Engine;
 use parking_lot::RwLock;
 use platform_challenge_sdk::RouteRequest;
 use platform_core::{ChainState, ChallengeId, Hotkey, SUDO_KEY_BYTES};
+use platform_distributed_storage::store::{DistributedStore, GetOptions, PutOptions, StorageKey};
 use platform_subnet_manager::BanList;
 use serde_json::Value;
 use sp_core::Pair;
@@ -72,6 +73,7 @@ pub struct RpcServer {
     state: Arc<RpcState>,
     rpc_handler: Arc<RpcHandler>,
     p2p_tx: Option<mpsc::Sender<RpcP2PCommand>>,
+    storage: Option<Arc<dyn DistributedStore>>,
 }
 
 impl RpcServer {
@@ -96,6 +98,7 @@ impl RpcServer {
             state,
             rpc_handler,
             p2p_tx: None,
+            storage: None,
         }
     }
 
@@ -121,7 +124,14 @@ impl RpcServer {
             state,
             rpc_handler,
             p2p_tx: Some(p2p_tx),
+            storage: None,
         }
+    }
+
+    /// Attach a storage backend for sudo storage operations
+    pub fn with_storage(mut self, storage: Arc<dyn DistributedStore>) -> Self {
+        self.storage = Some(storage);
+        self
     }
 
     /// Get the RPC handler (to update peers, etc.)
@@ -232,6 +242,16 @@ impl RpcServer {
                     let handler = handler.clone();
                     let p2p_tx = p2p_tx.clone();
                     async move { sudo_challenge_handler(handler, p2p_tx, body.0).await }
+                })
+            })
+            // Sudo endpoint for direct storage operations (get/put/delete/list/snapshot/rollback)
+            .route("/sudo/storage", {
+                let chain_state = self.state.chain_state.clone();
+                let storage = self.storage.clone();
+                post(move |body: Json<Value>| {
+                    let chain_state = chain_state.clone();
+                    let storage = storage.clone();
+                    async move { sudo_storage_handler(chain_state, storage, body.0).await }
                 })
             })
             // Sudo endpoint for config/emission/weight changes
@@ -1368,4 +1388,397 @@ async fn sudo_action_handler(
             "message": "Sudo action applied and broadcast"
         })),
     )
+}
+
+// In-memory snapshot storage for rollback support
+static SNAPSHOTS: std::sync::LazyLock<
+    tokio::sync::RwLock<HashMap<String, Vec<(String, String, Option<Vec<u8>>)>>>,
+> = std::sync::LazyLock::new(|| tokio::sync::RwLock::new(HashMap::new()));
+
+/// Sudo storage handler - direct storage read/write with rollback
+async fn sudo_storage_handler(
+    chain_state: Arc<RwLock<ChainState>>,
+    storage: Option<Arc<dyn DistributedStore>>,
+    body: Value,
+) -> impl IntoResponse {
+    use serde::Deserialize;
+    use sha2::{Digest, Sha256};
+
+    #[derive(Deserialize)]
+    struct SudoStorageRequest {
+        op: String,
+        #[serde(default)]
+        namespace: String,
+        #[serde(default)]
+        key: String,
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(default)]
+        prefix: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        snapshot_id: Option<String>,
+        #[serde(default)]
+        keys: Vec<SudoStorageKeyEntry>,
+        signature: String,
+        timestamp: i64,
+    }
+
+    #[derive(Deserialize, Clone)]
+    struct SudoStorageKeyEntry {
+        namespace: String,
+        key: String,
+    }
+
+    let request: SudoStorageRequest = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "message": format!("Invalid request: {}", e)
+                })),
+            );
+        }
+    };
+
+    // Verify timestamp (5 min window)
+    let now = chrono::Utc::now().timestamp_millis();
+    if (now - request.timestamp).abs() > 5 * 60 * 1000 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "message": "Timestamp expired"
+            })),
+        );
+    }
+
+    // Verify sudo signature
+    let msg = format!("sudo:storage:{}:{}", request.op, request.timestamp);
+    let sig_bytes = match hex::decode(&request.signature) {
+        Ok(s) if s.len() == 64 => s,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({ "success": false, "message": "Invalid signature format" }),
+                ),
+            );
+        }
+    };
+    let signature = match sp_core::sr25519::Signature::from_slice(&sig_bytes) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "success": false, "message": "Invalid signature" })),
+            );
+        }
+    };
+    let sudo_public = sp_core::sr25519::Public::from_raw(SUDO_KEY_BYTES);
+    if !sp_core::sr25519::Pair::verify(&signature, msg.as_bytes(), &sudo_public) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "success": false, "message": "Not authorized" })),
+        );
+    }
+
+    let storage = match storage {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "success": false, "message": "Storage not available" })),
+            );
+        }
+    };
+
+    match request.op.as_str() {
+        "get" => {
+            let sk = StorageKey::new(
+                &request.namespace,
+                hex::decode(&request.key).unwrap_or_default(),
+            );
+            match storage.get(&sk, GetOptions::default()).await {
+                Ok(Some(val)) => {
+                    let value_b64 = base64::engine::general_purpose::STANDARD.encode(&val.data);
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "success": true,
+                            "value": value_b64,
+                            "value_utf8": String::from_utf8(val.data.clone()).ok(),
+                            "metadata": {
+                                "version": val.metadata.version,
+                                "size": val.data.len(),
+                            }
+                        })),
+                    )
+                }
+                Ok(None) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "success": true, "value": null })),
+                ),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "success": false, "message": format!("{}", e) })),
+                ),
+            }
+        }
+
+        "put" => {
+            let key_bytes = hex::decode(&request.key).unwrap_or_default();
+            let sk = StorageKey::new(&request.namespace, &key_bytes);
+
+            // Auto-snapshot the old value before overwriting
+            let old_value = storage.get(&sk, GetOptions::default()).await.ok().flatten();
+
+            let value_bytes = match &request.value {
+                Some(v) => {
+                    // Try base64 first, fall back to raw UTF-8
+                    base64::engine::general_purpose::STANDARD
+                        .decode(v)
+                        .unwrap_or_else(|_| v.as_bytes().to_vec())
+                }
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "success": false, "message": "Missing value" })),
+                    );
+                }
+            };
+
+            match storage
+                .put(sk, value_bytes.clone(), PutOptions::default())
+                .await
+            {
+                Ok(meta) => {
+                    info!(
+                        namespace = %request.namespace,
+                        key = %request.key,
+                        size = value_bytes.len(),
+                        "Sudo storage PUT"
+                    );
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "success": true,
+                            "version": meta.version,
+                            "had_previous": old_value.is_some(),
+                        })),
+                    )
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "success": false, "message": format!("{}", e) })),
+                ),
+            }
+        }
+
+        "delete" => {
+            let key_bytes = hex::decode(&request.key).unwrap_or_default();
+            let sk = StorageKey::new(&request.namespace, &key_bytes);
+            match storage.delete(&sk).await {
+                Ok(deleted) => {
+                    info!(
+                        namespace = %request.namespace,
+                        key = %request.key,
+                        deleted = deleted,
+                        "Sudo storage DELETE"
+                    );
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({ "success": true, "deleted": deleted })),
+                    )
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "success": false, "message": format!("{}", e) })),
+                ),
+            }
+        }
+
+        "list" => {
+            let prefix_bytes = request
+                .prefix
+                .as_ref()
+                .map(|p| hex::decode(p).unwrap_or_else(|_| p.as_bytes().to_vec()));
+            let limit = request.limit.unwrap_or(100).min(1000);
+
+            match storage
+                .list_prefix(&request.namespace, prefix_bytes.as_deref(), limit, None)
+                .await
+            {
+                Ok(result) => {
+                    let entries: Vec<Value> = result
+                        .items
+                        .iter()
+                        .map(|(k, v)| {
+                            serde_json::json!({
+                                "key": hex::encode(&k.key),
+                                "value_b64": base64::engine::general_purpose::STANDARD.encode(&v.data),
+                                "value_utf8": String::from_utf8(v.data.clone()).ok(),
+                                "size": v.data.len(),
+                            })
+                        })
+                        .collect();
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "success": true,
+                            "count": entries.len(),
+                            "has_more": result.has_more,
+                            "entries": entries,
+                        })),
+                    )
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "success": false, "message": format!("{}", e) })),
+                ),
+            }
+        }
+
+        "snapshot" => {
+            let snapshot_id = request
+                .snapshot_id
+                .unwrap_or_else(|| format!("snap_{}", chrono::Utc::now().timestamp()));
+
+            if request.keys.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "success": false, "message": "No keys specified" })),
+                );
+            }
+
+            let mut entries = Vec::new();
+            for entry in &request.keys {
+                let key_bytes = hex::decode(&entry.key).unwrap_or_default();
+                let sk = StorageKey::new(&entry.namespace, &key_bytes);
+                let val = storage
+                    .get(&sk, GetOptions::default())
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|v| v.data);
+                entries.push((entry.namespace.clone(), entry.key.clone(), val));
+            }
+
+            let count = entries.len();
+            SNAPSHOTS.write().await.insert(snapshot_id.clone(), entries);
+
+            info!(snapshot_id = %snapshot_id, keys = count, "Sudo storage SNAPSHOT created");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "snapshot_id": snapshot_id,
+                    "keys_saved": count,
+                })),
+            )
+        }
+
+        "rollback" => {
+            let snapshot_id = match request.snapshot_id {
+                Some(id) => id,
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "message": "Missing snapshot_id"
+                        })),
+                    );
+                }
+            };
+
+            let entries = match SNAPSHOTS.write().await.remove(&snapshot_id) {
+                Some(e) => e,
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "message": format!("Snapshot '{}' not found", snapshot_id)
+                        })),
+                    );
+                }
+            };
+
+            let mut restored = 0u32;
+            let mut deleted = 0u32;
+            let mut errors = 0u32;
+
+            for (namespace, key, old_value) in &entries {
+                let key_bytes = hex::decode(key).unwrap_or_default();
+                let sk = StorageKey::new(namespace, &key_bytes);
+                match old_value {
+                    Some(val) => {
+                        if storage
+                            .put(sk, val.clone(), PutOptions::default())
+                            .await
+                            .is_ok()
+                        {
+                            restored += 1;
+                        } else {
+                            errors += 1;
+                        }
+                    }
+                    None => {
+                        if storage.delete(&sk).await.is_ok() {
+                            deleted += 1;
+                        } else {
+                            errors += 1;
+                        }
+                    }
+                }
+            }
+
+            info!(
+                snapshot_id = %snapshot_id,
+                restored = restored,
+                deleted = deleted,
+                errors = errors,
+                "Sudo storage ROLLBACK"
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "snapshot_id": snapshot_id,
+                    "restored": restored,
+                    "deleted": deleted,
+                    "errors": errors,
+                })),
+            )
+        }
+
+        "snapshots" => {
+            let snaps = SNAPSHOTS.read().await;
+            let list: Vec<Value> = snaps
+                .iter()
+                .map(|(id, entries)| {
+                    serde_json::json!({
+                        "snapshot_id": id,
+                        "keys": entries.len(),
+                    })
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "success": true, "snapshots": list })),
+            )
+        }
+
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "message": format!("Unknown op '{}'. Use: get, put, delete, list, snapshot, rollback, snapshots", request.op)
+            })),
+        ),
+    }
 }
