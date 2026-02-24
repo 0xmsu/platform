@@ -267,6 +267,10 @@ struct Args {
     #[arg(long, env = "RPC_ADDR", default_value = "0.0.0.0:8080")]
     rpc_addr: String,
 
+    /// Chutes API key for LLM inference (enables LLM review in WASM challenges)
+    #[arg(long, env = "CHUTES_API_KEY")]
+    chutes_api_key: Option<String>,
+
     /// Disable RPC server
     #[arg(long)]
     no_rpc: bool,
@@ -668,7 +672,7 @@ async fn main() -> Result<()> {
             local_proposal_tx,
             keypair.clone(),
         )),
-        chutes_api_key: None,
+        chutes_api_key: args.chutes_api_key.clone(),
         distributed_storage: Some(storage_dyn),
     }) {
         Ok(executor) => {
