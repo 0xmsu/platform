@@ -965,7 +965,7 @@ mod tests {
 
 /// Handler for sudo challenge management
 async fn sudo_challenge_handler(
-    _handler: Arc<RpcHandler>,
+    handler: Arc<RpcHandler>,
     p2p_tx: Option<mpsc::Sender<RpcP2PCommand>>,
     body: Value,
 ) -> impl IntoResponse {
@@ -1083,12 +1083,21 @@ async fn sudo_challenge_handler(
 
     // Broadcast via P2P if channel is available
     if let Some(tx) = p2p_tx {
-        // Parse challenge ID (UUID format)
+        // Resolve challenge ID: UUID, name lookup, or deterministic hash
         let challenge_id = match uuid::Uuid::parse_str(&request.challenge_id) {
             Ok(uuid) => ChallengeId::from_uuid(uuid),
             Err(_) => {
-                // Try as simple string
-                ChallengeId::from_string(&request.challenge_id)
+                // Try to find existing challenge by name
+                let chain = handler.chain_state.read();
+                let found = chain
+                    .wasm_challenge_configs
+                    .values()
+                    .find(|c| c.name == request.challenge_id);
+                if let Some(config) = found {
+                    config.challenge_id
+                } else {
+                    ChallengeId::from_string(&request.challenge_id)
+                }
             }
         };
 

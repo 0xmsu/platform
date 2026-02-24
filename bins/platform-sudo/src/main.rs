@@ -196,24 +196,24 @@ impl SudoCli {
 
         info!(file = %file.display(), size = wasm_bytes.len(), "Uploading WASM module");
 
-        let challenge_id = if challenge_id == "new" {
-            ChallengeId::new()
+        // Send challenge_id as-is (name or UUID). Server resolves names to UUIDs.
+        let id_str = if challenge_id == "new" {
+            ChallengeId::new().to_string()
         } else {
-            ChallengeId::from_string(challenge_id)
+            challenge_id.to_string()
         };
 
         let timestamp = chrono::Utc::now().timestamp_millis();
 
-        // Sign the message (format must match server: "sudo:{action}:{challenge_id}:{timestamp}")
-        let msg_to_sign = format!("sudo:wasm_upload:{}:{}", challenge_id, timestamp);
+        // Sign with the raw id string (server verifies against same string)
+        let msg_to_sign = format!("sudo:wasm_upload:{}:{}", id_str, timestamp);
         let signature = self.sign(msg_to_sign.as_bytes())?;
 
-        // Send via RPC
         let request = SudoRequest {
             action: "wasm_upload".to_string(),
-            challenge_id: challenge_id.to_string(),
+            challenge_id: id_str.clone(),
             data: Some(base64::engine::general_purpose::STANDARD.encode(&wasm_bytes)),
-            name: name.or_else(|| Some(challenge_id.to_string())),
+            name: name.or_else(|| Some(id_str.clone())),
             signature: hex::encode(&signature),
             timestamp,
         };
@@ -246,9 +246,7 @@ impl SudoCli {
         let action = if active { "activate" } else { "deactivate" };
         let timestamp = chrono::Utc::now().timestamp_millis();
 
-        let challenge_id = ChallengeId::from_string(challenge_id);
-
-        // Sign the message (format must match server: "sudo:{action}:{challenge_id}:{timestamp}")
+        // Send as-is; server resolves names to UUIDs
         let msg_to_sign = format!("sudo:{}:{}:{}", action, challenge_id, timestamp);
         let signature = self.sign(msg_to_sign.as_bytes())?;
 
@@ -272,7 +270,7 @@ impl SudoCli {
         if response.status().is_success() {
             let result: SudoResponse = response.json().await?;
             if result.success {
-                info!(challenge_id = %challenge_id, action = action, "Challenge status updated");
+                info!(id = %challenge_id, action = action, "Challenge status updated");
             } else {
                 warn!(message = %result.message, "Status update failed");
             }
@@ -287,7 +285,6 @@ impl SudoCli {
 
     async fn rename_challenge(&self, challenge_id: &str, new_name: &str) -> Result<()> {
         let timestamp = chrono::Utc::now().timestamp_millis();
-        let challenge_id = ChallengeId::from_string(challenge_id);
 
         // Sign the message
         let msg_to_sign = format!("sudo:rename:{}:{}:{}", challenge_id, new_name, timestamp);
