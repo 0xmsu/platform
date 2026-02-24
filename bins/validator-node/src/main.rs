@@ -969,7 +969,7 @@ async fn main() -> Result<()> {
     let mut wasm_eval_interval = tokio::time::interval(Duration::from_secs(5));
     let mut stale_job_interval = tokio::time::interval(Duration::from_secs(120));
     let mut weight_check_interval = tokio::time::interval(Duration::from_secs(30));
-    let _last_weight_submission_epoch: u64 = 0; // Weights now submitted via CommitWindowOpen
+    let mut last_weight_submission_epoch: u64 = 0;
     let mut challenge_sync_interval = tokio::time::interval(Duration::from_secs(30)); // Check every 30s
     let mut last_sync_block: u64 = 0;
     let sync_block_interval: u64 = 1; // Call WASM sync every block, WASM decides frequency internally
@@ -1021,6 +1021,7 @@ async fn main() -> Result<()> {
                     &keypair,
                     &chain_state,
                     &storage,
+                    &mut last_weight_submission_epoch,
                 ).await;
             }
 
@@ -3522,6 +3523,7 @@ async fn handle_block_event(
     _keypair: &Keypair,
     chain_state: &Arc<RwLock<platform_core::ChainState>>,
     storage: &Arc<TrackedStorage>,
+    last_weight_submission_epoch: &mut u64,
 ) {
     match event {
         BlockSyncEvent::NewBlock { block_number, .. } => {
@@ -3553,6 +3555,14 @@ async fn handle_block_event(
                 "=== COMMIT WINDOW OPEN: epoch {} block {} ===",
                 epoch, block
             );
+
+            if epoch <= *last_weight_submission_epoch {
+                info!(
+                    "Skipping weight submission for epoch {} (already submitted in epoch {})",
+                    epoch, *last_weight_submission_epoch
+                );
+                return;
+            }
 
             // Single submission path: collect WASM weights, convert hotkey->UID,
             // apply emission_weight, and submit directly via Subtensor.
@@ -3794,12 +3804,25 @@ async fn handle_block_event(
                                 "Mechanism {} weights submitted: {:?}",
                                 mechanism_id, resp.tx_hash
                             );
+                            *last_weight_submission_epoch = epoch;
                         }
                         Ok(resp) => {
                             warn!("Mechanism {} issue: {}", mechanism_id, resp.message);
                         }
                         Err(e) => {
-                            error!("Mechanism {} weight submission failed: {}", mechanism_id, e);
+                            let err_str = format!("{}", e);
+                            if err_str.contains("Priority is too low") {
+                                warn!(
+                                    "Mechanism {}: transaction already in mempool (Priority too low) - treating as submitted",
+                                    mechanism_id
+                                );
+                                *last_weight_submission_epoch = epoch;
+                            } else {
+                                error!(
+                                    "Mechanism {} weight submission failed: {}",
+                                    mechanism_id, e
+                                );
+                            }
                         }
                     }
                 }
