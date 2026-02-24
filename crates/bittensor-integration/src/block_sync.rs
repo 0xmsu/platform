@@ -175,6 +175,7 @@ impl BlockSync {
         // Process events in background
         tokio::spawn(async move {
             let mut was_disconnected = false;
+            let mut first_block_seen = false;
 
             loop {
                 if !*running.read().await {
@@ -190,6 +191,7 @@ impl BlockSync {
                             &current_epoch,
                             &current_phase,
                             &mut was_disconnected,
+                            &mut first_block_seen,
                         )
                         .await;
 
@@ -218,6 +220,7 @@ impl BlockSync {
         current_epoch: &Arc<RwLock<u64>>,
         current_phase: &Arc<RwLock<EpochPhase>>,
         was_disconnected: &mut bool,
+        first_block_seen: &mut bool,
     ) -> bool {
         match event {
             BlockEvent::NewBlock {
@@ -227,6 +230,24 @@ impl BlockSync {
                 *current_block.write().await = block_number;
                 *current_epoch.write().await = epoch_info.epoch_number;
                 *current_phase.write().await = epoch_info.phase;
+
+                // On first block after startup, trigger immediate weight submission
+                // so the validator doesn't have to wait for the next epoch boundary.
+                if !*first_block_seen {
+                    *first_block_seen = true;
+                    if epoch_info.commit_reveal_enabled {
+                        info!(
+                            "First block after startup: triggering immediate weight submission (epoch={}, block={})",
+                            epoch_info.epoch_number, block_number
+                        );
+                        let _ = event_tx
+                            .send(BlockSyncEvent::CommitWindowOpen {
+                                epoch: epoch_info.epoch_number,
+                                block: block_number,
+                            })
+                            .await;
+                    }
+                }
 
                 if let Err(e) = event_tx
                     .send(BlockSyncEvent::NewBlock {
@@ -416,6 +437,7 @@ mod tests {
         let current_epoch = Arc::new(RwLock::new(0));
         let current_phase = Arc::new(RwLock::new(EpochPhase::Evaluation));
         let mut was_disconnected = true;
+        let mut first_block_seen = false;
 
         let epoch_info = sample_epoch_info(123, 9, EpochPhase::CommitWindow);
 
@@ -429,6 +451,7 @@ mod tests {
             &current_epoch,
             &current_phase,
             &mut was_disconnected,
+            &mut first_block_seen,
         )
         .await;
 
@@ -440,10 +463,13 @@ mod tests {
             EpochPhase::CommitWindow
         ));
 
+        // First event: CommitWindowOpen (triggered on first block after startup)
         let first = rx.recv().await.unwrap();
-        assert!(matches!(first, BlockSyncEvent::NewBlock { .. }));
+        assert!(matches!(first, BlockSyncEvent::CommitWindowOpen { .. }));
         let second = rx.recv().await.unwrap();
-        assert!(matches!(second, BlockSyncEvent::Reconnected));
+        assert!(matches!(second, BlockSyncEvent::NewBlock { .. }));
+        let third = rx.recv().await.unwrap();
+        assert!(matches!(third, BlockSyncEvent::Reconnected));
         assert!(!was_disconnected);
     }
 
@@ -454,6 +480,7 @@ mod tests {
         let current_epoch = Arc::new(RwLock::new(0));
         let current_phase = Arc::new(RwLock::new(EpochPhase::Evaluation));
         let mut was_disconnected = false;
+        let mut first_block_seen = false;
 
         let should_break = BlockSync::handle_block_event(
             BlockEvent::PhaseChange {
@@ -467,6 +494,7 @@ mod tests {
             &current_epoch,
             &current_phase,
             &mut was_disconnected,
+            &mut first_block_seen,
         )
         .await;
 
@@ -493,6 +521,7 @@ mod tests {
         let current_epoch = Arc::new(RwLock::new(0));
         let current_phase = Arc::new(RwLock::new(EpochPhase::Evaluation));
         let mut was_disconnected = false;
+        let mut first_block_seen = false;
 
         let should_break = BlockSync::handle_block_event(
             BlockEvent::Stopped,
@@ -501,6 +530,7 @@ mod tests {
             &current_epoch,
             &current_phase,
             &mut was_disconnected,
+            &mut first_block_seen,
         )
         .await;
 
@@ -515,6 +545,7 @@ mod tests {
         let current_epoch = Arc::new(RwLock::new(0));
         let current_phase = Arc::new(RwLock::new(EpochPhase::Evaluation));
         let mut was_disconnected = false;
+        let mut first_block_seen = false;
 
         BlockSync::handle_block_event(
             BlockEvent::EpochTransition(EpochTransition::NewEpoch {
@@ -527,6 +558,7 @@ mod tests {
             &current_epoch,
             &current_phase,
             &mut was_disconnected,
+            &mut first_block_seen,
         )
         .await;
 
@@ -548,6 +580,7 @@ mod tests {
         let current_epoch = Arc::new(RwLock::new(0));
         let current_phase = Arc::new(RwLock::new(EpochPhase::Evaluation));
         let mut was_disconnected = false;
+        let mut first_block_seen = false;
 
         BlockSync::handle_block_event(
             BlockEvent::PhaseChange {
@@ -561,6 +594,7 @@ mod tests {
             &current_epoch,
             &current_phase,
             &mut was_disconnected,
+            &mut first_block_seen,
         )
         .await;
 
@@ -583,6 +617,7 @@ mod tests {
         let current_epoch = Arc::new(RwLock::new(0));
         let current_phase = Arc::new(RwLock::new(EpochPhase::Evaluation));
         let mut was_disconnected = false;
+        let mut first_block_seen = false;
 
         let should_break = BlockSync::handle_block_event(
             BlockEvent::ConnectionError("network wobble".into()),
@@ -591,6 +626,7 @@ mod tests {
             &current_epoch,
             &current_phase,
             &mut was_disconnected,
+            &mut first_block_seen,
         )
         .await;
 

@@ -970,6 +970,12 @@ async fn main() -> Result<()> {
     let mut stale_job_interval = tokio::time::interval(Duration::from_secs(120));
     let mut weight_check_interval = tokio::time::interval(Duration::from_secs(30));
     let mut last_weight_submission_epoch: u64 = 0;
+    let startup_rpc_precompute_delay = tokio::time::sleep(Duration::from_secs(70));
+    tokio::pin!(startup_rpc_precompute_delay);
+    let mut startup_rpc_precomputed = false;
+    let startup_weight_delay = tokio::time::sleep(Duration::from_secs(90));
+    tokio::pin!(startup_weight_delay);
+    let mut startup_weights_submitted = false;
     let mut challenge_sync_interval = tokio::time::interval(Duration::from_secs(30)); // Check every 30s
     let mut last_sync_block: u64 = 0;
     let sync_block_interval: u64 = 1; // Call WASM sync every block, WASM decides frequency internally
@@ -1534,6 +1540,105 @@ async fn main() -> Result<()> {
             // the CommitWindowOpen handler already consumed them.
             _ = weight_check_interval.tick() => {
                 // No-op: weights are submitted in CommitWindowOpen via CRv4
+            }
+
+            // Pre-compute weights for RPC 70s after boot so other validators
+            // without P2P can fetch via subnet_getWeights before on-chain submission.
+            _ = &mut startup_rpc_precompute_delay, if !startup_rpc_precomputed => {
+                startup_rpc_precomputed = true;
+                let current_block = state_manager.apply(|state| state.bittensor_block);
+                if current_block == 0 {
+                    warn!("RPC pre-compute skipped: blockchain not yet synced");
+                } else if let Some(ref executor) = wasm_executor {
+                    let challenges: Vec<(String, u8, f64)> = {
+                        let cs = chain_state.read();
+                        cs.wasm_challenge_configs.iter()
+                            .filter(|(_, cfg)| cfg.is_active)
+                            .map(|(id, cfg)| (id.to_string(), cfg.config.mechanism_id, cfg.config.emission_weight))
+                            .collect()
+                    };
+                    if challenges.is_empty() {
+                        warn!("RPC pre-compute skipped: no active challenges loaded");
+                    } else {
+                        let tempo = 360u64;
+                        let netuid_plus_one = (netuid as u64).saturating_add(1);
+                        let epoch = current_block.saturating_add(netuid_plus_one) / (tempo + 1);
+                        let mut precomputed: Vec<(u8, Vec<u16>, Vec<u16>)> = Vec::new();
+                        for (cid, mid, ew) in &challenges {
+                            let ew = ew.clamp(0.0, 1.0);
+                            if ew < 0.001 { continue; }
+                            if let Ok(assignments) = executor.execute_get_weights_with_block(cid, current_block, epoch) {
+                                if assignments.is_empty() { continue; }
+                                let total: f64 = assignments.iter().map(|a| a.weight).sum();
+                                if total <= 0.0 { continue; }
+                                let mut uids = Vec::new();
+                                let mut vals = Vec::new();
+                                let mut assigned = 0.0f64;
+                                for a in &assignments {
+                                    if let Some(uid) = subtensor_client.as_ref().and_then(|c| c.get_uid_for_hotkey(&a.hotkey)) {
+                                        let scaled = (a.weight / total) * ew;
+                                        let v = (scaled * 65535.0).round() as u16;
+                                        if v > 0 { uids.push(uid); vals.push(v); assigned += scaled; }
+                                    }
+                                }
+                                let burn = 1.0 - assigned;
+                                if burn > 0.001 {
+                                    let bv = (burn * 65535.0).round() as u16;
+                                    if let Some(pos) = uids.iter().position(|&u| u == 0) {
+                                        vals[pos] = vals[pos].saturating_add(bv);
+                                    } else { uids.push(0); vals.push(bv); }
+                                }
+                                if !uids.is_empty() {
+                                    let mx = *vals.iter().max().unwrap() as f64;
+                                    if mx > 0.0 && mx < 65535.0 {
+                                        vals = vals.iter().map(|v| ((*v as f64 / mx) * 65535.0).round() as u16).collect();
+                                    }
+                                    precomputed.push((*mid, uids, vals));
+                                }
+                            }
+                        }
+                        if !precomputed.is_empty() {
+                            info!("RPC pre-compute: {} mechanism entries available via subnet_getWeights (70s after boot)", precomputed.len());
+                            let mut cs = chain_state.write();
+                            cs.last_computed_weights = precomputed;
+                        } else {
+                            warn!("RPC pre-compute: no weights computed (WASM returned empty)");
+                        }
+                    }
+                }
+            }
+
+            // Submit weights on-chain 90s after boot (after RPC pre-compute at 70s).
+            _ = &mut startup_weight_delay, if !startup_weights_submitted => {
+                startup_weights_submitted = true;
+                let current_block = state_manager.apply(|state| state.bittensor_block);
+                if current_block == 0 {
+                    warn!("Startup weight submission skipped: blockchain not yet synced");
+                } else if subtensor.is_none() || subtensor_signer.is_none() {
+                    warn!("Startup weight submission skipped: subtensor not connected");
+                } else if wasm_executor.is_none() {
+                    warn!("Startup weight submission skipped: WASM executor not ready");
+                } else {
+                    let has_challenges = {
+                        let cs = chain_state.read();
+                        cs.wasm_challenge_configs.iter().any(|(_, cfg)| cfg.is_active)
+                    };
+                    if !has_challenges {
+                        warn!("Startup weight submission skipped: no active challenges loaded");
+                    } else {
+                        let tempo = 360u64;
+                        let netuid_plus_one = (netuid as u64).saturating_add(1);
+                        let epoch = current_block.saturating_add(netuid_plus_one) / (tempo + 1);
+                        info!("Startup weight submission: epoch {} block {} (90s after boot)", epoch, current_block);
+                        handle_block_event(
+                            BlockSyncEvent::CommitWindowOpen { epoch, block: current_block },
+                            &subtensor, &subtensor_signer, &subtensor_client,
+                            &state_manager, netuid, version_key, &wasm_executor,
+                            &keypair, &chain_state, &storage,
+                            &mut last_weight_submission_epoch,
+                        ).await;
+                    }
+                }
             }
 
             // Periodic checkpoint
