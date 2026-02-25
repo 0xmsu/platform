@@ -359,14 +359,13 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&args.data_dir)?;
     let data_dir = std::fs::canonicalize(&args.data_dir)?;
 
+    // Compact distributed storage on startup if needed (one-time migration)
+    let db_path = data_dir.join("distributed.db");
+    compact_storage_if_needed(&db_path)?;
+
     // Initialize distributed storage with compression and tracking
     let local_storage = LocalStorageBuilder::new(&validator_hotkey)
-        .path(
-            data_dir
-                .join("distributed.db")
-                .to_string_lossy()
-                .to_string(),
-        )
+        .path(db_path.to_string_lossy().to_string())
         .build()?;
 
     // Wrap with TrackedStorage for automatic compression, indexing, and audit
@@ -4259,6 +4258,114 @@ async fn fetch_remote_weights() -> anyhow::Result<Vec<(u8, Vec<u16>, Vec<u16>)>>
     }
 
     Ok(result)
+}
+
+/// Compact the sled distributed.db if blob files are wasting space.
+///
+/// Sled accumulates dead data in blob files that are never reclaimed.
+/// This does a full export→delete→reimport cycle to reclaim disk space.
+/// A marker file `.compacted_v1` is written after success so it only runs once.
+fn compact_storage_if_needed(db_path: &std::path::Path) -> anyhow::Result<()> {
+    let marker = db_path.parent().unwrap_or(db_path).join(".compacted_v1");
+    if marker.exists() {
+        return Ok(());
+    }
+
+    if !db_path.exists() {
+        return Ok(());
+    }
+
+    // Check total size of blob files
+    let blobs_dir = db_path.join("blobs");
+    let total_blob_size = if blobs_dir.exists() {
+        std::fs::read_dir(&blobs_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| e.metadata().ok())
+                    .map(|m| m.len())
+                    .sum::<u64>()
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let threshold = 2 * 1024 * 1024 * 1024u64; // 2 GB
+    if total_blob_size < threshold {
+        info!(
+            blob_size_mb = total_blob_size / (1024 * 1024),
+            "Storage compaction not needed"
+        );
+        std::fs::write(&marker, b"skipped").ok();
+        return Ok(());
+    }
+
+    warn!(
+        blob_size_gb = total_blob_size / (1024 * 1024 * 1024),
+        "Large blob files detected, compacting distributed.db (this may take a few minutes)"
+    );
+
+    // Phase 1: Open and export all data
+    let db = sled::open(db_path)?;
+    let export = db.export();
+    let db_size_before = total_blob_size;
+
+    let tree_count = export.len();
+    info!(trees = tree_count, "Exported data from distributed.db");
+    drop(db);
+
+    // Phase 2: Move old DB to temp, create fresh one
+    let tmp_path = db_path.with_extension("db.old");
+    if tmp_path.exists() {
+        std::fs::remove_dir_all(&tmp_path)?;
+    }
+    std::fs::rename(db_path, &tmp_path)?;
+
+    // Phase 3: Import into fresh DB
+    let new_db = sled::open(db_path)?;
+    new_db.import(export);
+    new_db.flush()?;
+    drop(new_db);
+
+    // Phase 4: Measure new size and cleanup
+    let new_blob_size = if db_path.join("blobs").exists() {
+        std::fs::read_dir(db_path.join("blobs"))
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| e.metadata().ok())
+                    .map(|m| m.len())
+                    .sum::<u64>()
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    info!(
+        before_gb = db_size_before / (1024 * 1024 * 1024),
+        after_gb = new_blob_size / (1024 * 1024 * 1024),
+        saved_gb = (db_size_before.saturating_sub(new_blob_size)) / (1024 * 1024 * 1024),
+        "Storage compaction complete"
+    );
+
+    // Remove old DB
+    if let Err(e) = std::fs::remove_dir_all(&tmp_path) {
+        warn!(error = %e, "Failed to remove old distributed.db.old (can be deleted manually)");
+    }
+
+    // Write marker so we don't compact again
+    std::fs::write(
+        &marker,
+        format!(
+            "compacted: before={}GB after={}GB",
+            db_size_before / (1024 * 1024 * 1024),
+            new_blob_size / (1024 * 1024 * 1024),
+        ),
+    )?;
+
+    Ok(())
 }
 
 // Build trigger: 1771754356
