@@ -121,8 +121,8 @@ impl Default for ChallengeConfig {
             mechanism_id: 0, // Default to mechanism 0 (main mechanism)
             timeout_secs: 300,
             max_memory_mb: 512,
-            max_cpu_secs: 60,
-            emission_weight: 1.0,
+            max_cpu_secs: 1800,
+            emission_weight: 0.0,
             min_validators: 1,
             params_json: "{}".to_string(),
             wasm: WasmConfig::default(),
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(config.mechanism_id, 5);
         assert_eq!(config.timeout_secs, 300); // Should have other defaults
         assert_eq!(config.max_memory_mb, 512);
-        assert_eq!(config.emission_weight, 1.0);
+        assert_eq!(config.emission_weight, 0.0);
     }
 
     #[test]
@@ -384,8 +384,8 @@ mod tests {
         assert_eq!(config.mechanism_id, 0);
         assert_eq!(config.timeout_secs, 300);
         assert_eq!(config.max_memory_mb, 512);
-        assert_eq!(config.max_cpu_secs, 60);
-        assert_eq!(config.emission_weight, 1.0);
+        assert_eq!(config.max_cpu_secs, 1800);
+        assert_eq!(config.emission_weight, 0.0);
         assert_eq!(config.min_validators, 1);
         assert_eq!(config.params_json, "{}");
         assert!(config.wasm.restart_id.is_empty());
