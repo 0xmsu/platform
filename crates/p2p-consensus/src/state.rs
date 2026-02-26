@@ -1102,15 +1102,24 @@ impl ChainState {
             return None;
         }
 
-        // Normalize and convert to u16
-        let max_weight = uid_weights.values().copied().fold(0.0f64, f64::max);
+        // Normalize by total_stake to get proper stake-weighted average,
+        // then max-upscale so the largest value = u16::MAX
+        let stake_normalized: Vec<(u16, f64)> = uid_weights
+            .into_iter()
+            .map(|(uid, w)| (uid, w / total_stake as f64))
+            .collect();
 
-        let final_weights: Vec<(u16, u16)> = if max_weight > 0.0 {
-            uid_weights
+        let max_normalized = stake_normalized
+            .iter()
+            .map(|(_, w)| *w)
+            .fold(0.0f64, f64::max);
+
+        let final_weights: Vec<(u16, u16)> = if max_normalized > 0.0 {
+            stake_normalized
                 .into_iter()
                 .map(|(uid, w)| {
-                    let normalized = ((w / max_weight) * u16::MAX as f64) as u16;
-                    (uid, normalized)
+                    let upscaled = ((w / max_normalized) * u16::MAX as f64).round() as u16;
+                    (uid, upscaled)
                 })
                 .collect()
         } else {

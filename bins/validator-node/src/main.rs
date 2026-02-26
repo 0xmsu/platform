@@ -3392,6 +3392,7 @@ async fn handle_network_event(
                     let response = P2PMessage::CoreStateResponse(
                         platform_p2p_consensus::CoreStateResponseMessage {
                             responder: keypair.hotkey(),
+                            target: Some(req.requester.clone()),
                             state_hash,
                             mutation_sequence,
                             state_data,
@@ -3409,6 +3410,14 @@ async fn handle_network_event(
                 }
             }
             P2PMessage::CoreStateResponse(resp) => {
+                // Skip responses not targeted at us (reduces wasted processing)
+                if let Some(ref target) = resp.target {
+                    if *target != keypair.hotkey() {
+                        debug!("Ignoring CoreStateResponse targeted at another validator");
+                        return;
+                    }
+                }
+
                 info!(
                     responder = %resp.responder.to_ss58(),
                     mutation_seq = resp.mutation_sequence,

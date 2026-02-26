@@ -879,6 +879,9 @@ pub struct CoreStateRequestMessage {
 pub struct CoreStateResponseMessage {
     /// Responding validator
     pub responder: Hotkey,
+    /// Target requester (only this validator should process the response)
+    #[serde(default)]
+    pub target: Option<Hotkey>,
     /// Core state hash
     pub state_hash: [u8; 32],
     /// Mutation sequence

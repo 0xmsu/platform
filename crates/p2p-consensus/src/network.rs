@@ -1124,13 +1124,38 @@ impl P2PNetwork {
         }
     }
 
-    // TODO: Route challenge-specific messages to challenge_topic
-    /// Broadcast a message (internal helper for command handling)
+    /// Broadcast a message, routing to the appropriate gossipsub topic.
+    /// Consensus/state messages go to consensus_topic.
+    /// Challenge-specific messages go to challenge_topic.
     fn do_broadcast(
         &self,
         swarm: &mut Swarm<CombinedBehaviour>,
         message: P2PMessage,
     ) -> Result<(), NetworkError> {
+        let topic = match &message {
+            // Challenge-specific messages -> challenge_topic
+            P2PMessage::Submission(_)
+            | P2PMessage::Evaluation(_)
+            | P2PMessage::JobClaim(_)
+            | P2PMessage::JobAssignment(_)
+            | P2PMessage::DataRequest(_)
+            | P2PMessage::DataResponse(_)
+            | P2PMessage::TaskProgress(_)
+            | P2PMessage::TaskResult(_)
+            | P2PMessage::LeaderboardRequest(_)
+            | P2PMessage::LeaderboardResponse(_)
+            | P2PMessage::ChallengeUpdate(_)
+            | P2PMessage::StorageProposal(_)
+            | P2PMessage::StorageVote(_)
+            | P2PMessage::ReviewAssignment(_)
+            | P2PMessage::ReviewDecline(_)
+            | P2PMessage::ReviewResult(_)
+            | P2PMessage::AgentLogProposal(_)
+            | P2PMessage::StorageRootSync(_) => self.challenge_topic.clone(),
+            // Consensus and state messages -> consensus_topic
+            _ => self.consensus_topic.clone(),
+        };
+
         let signed = self.sign_message(message)?;
         let bytes =
             bincode::serialize(&signed).map_err(|e| NetworkError::Serialization(e.to_string()))?;
@@ -1138,7 +1163,7 @@ impl P2PNetwork {
         swarm
             .behaviour_mut()
             .gossipsub
-            .publish(self.consensus_topic.clone(), bytes)
+            .publish(topic, bytes)
             .map_err(|e| NetworkError::Gossipsub(e.to_string()))?;
 
         debug!(msg_type = %signed.message.type_name(), "Broadcast message");

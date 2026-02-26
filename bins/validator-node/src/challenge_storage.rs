@@ -238,18 +238,33 @@ impl StorageBackend for ChallengeStorageBackend {
             })
             .map_err(|e| StorageHostError::StorageError(e.to_string()))
         } else {
-            // Use list_prefix with a high limit to count matching keys
+            // Paginated counting to avoid materializing all data at once
             let hex_prefix = hex::encode(prefix);
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(self.storage.list_prefix(
-                    challenge_id,
-                    Some(hex_prefix.as_bytes()),
-                    u32::MAX as usize,
-                    None,
-                ))
-            })
-            .map_err(|e| StorageHostError::StorageError(e.to_string()))?;
-            Ok(result.items.len() as u64)
+            let page_size = 1000usize;
+            let mut total = 0u64;
+            let mut continuation: Option<Vec<u8>> = None;
+
+            loop {
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(self.storage.list_prefix(
+                        challenge_id,
+                        Some(hex_prefix.as_bytes()),
+                        page_size,
+                        continuation.as_deref(),
+                    ))
+                })
+                .map_err(|e| StorageHostError::StorageError(e.to_string()))?;
+
+                let count = result.items.len() as u64;
+                total += count;
+
+                if count < page_size as u64 || result.continuation_token.is_none() {
+                    break;
+                }
+                continuation = result.continuation_token;
+            }
+
+            Ok(total)
         }
     }
 }
