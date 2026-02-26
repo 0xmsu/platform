@@ -1221,6 +1221,9 @@ async fn main() -> Result<()> {
                                             chain_state.clone(),
                                             "wasm_upload_local",
                                             |cs| {
+                                                // Preserve existing config (emission_weight, mechanism_id)
+                                                let existing_config = cs.wasm_challenge_configs.get(&challenge_id)
+                                                    .map(|c| c.config.clone());
                                                 let wasm_config = platform_core::WasmChallengeConfig {
                                                     challenge_id,
                                                     name: challenge_name,
@@ -1232,7 +1235,7 @@ async fn main() -> Result<()> {
                                                         version,
                                                         ..Default::default()
                                                     },
-                                                    config: platform_core::ChallengeConfig::default(),
+                                                    config: existing_config.unwrap_or_default(),
                                                     is_active: true,
                                                 };
                                                 cs.register_wasm_challenge(wasm_config);
@@ -3226,6 +3229,10 @@ async fn handle_network_event(
                                                     chain_state.clone(),
                                                     "wasm_consensus",
                                                     |cs| {
+                                                        // Preserve existing config (emission_weight, mechanism_id)
+                                                        // if this challenge was already registered.
+                                                        let existing_config = cs.wasm_challenge_configs.get(&cid)
+                                                            .map(|c| c.config.clone());
                                                         let wasm_config = platform_core::WasmChallengeConfig {
                                                             challenge_id: cid,
                                                             name: cname,
@@ -3237,7 +3244,7 @@ async fn handle_network_event(
                                                                 version,
                                                                 ..Default::default()
                                                             },
-                                                            config: platform_core::ChallengeConfig::default(),
+                                                            config: existing_config.unwrap_or_default(),
                                                             is_active: true,
                                                         };
                                                         cs.register_wasm_challenge(wasm_config);
@@ -3848,90 +3855,62 @@ async fn handle_block_event(
                 // Deduplicate by mechanism_id: pick the best (most UIDs) entry per
                 // mechanism to avoid nonce conflicts from multiple submissions.
                 // Burn-only entries (single UID 0) are used only if no real weights exist.
-                let weights_to_submit: Vec<(u8, Vec<u16>, Vec<u16>)> = if mechanism_weights
-                    .is_empty()
-                {
-                    let mechanism_id = {
-                        let cs = chain_state.read();
-                        cs.mechanism_configs.keys().next().copied().unwrap_or(0u8)
-                    };
-                    info!("No weights - submitting burn weights to UID 0");
-                    vec![(mechanism_id, vec![0u16], vec![65535u16])]
-                } else {
-                    use std::collections::HashMap;
-                    let mut best_per_mechanism: HashMap<u8, (Vec<u16>, Vec<u16>)> = HashMap::new();
-                    for (mid, uids, vals) in &mechanism_weights {
-                        let is_burn_only = uids.len() == 1 && uids[0] == 0;
-                        let existing = best_per_mechanism.get(mid);
-                        let replace = match existing {
-                            None => true,
-                            Some((ex_uids, _)) => {
-                                let ex_is_burn = ex_uids.len() == 1 && ex_uids[0] == 0;
-                                // Prefer real weights over burn; among real, prefer more UIDs
-                                if is_burn_only && !ex_is_burn {
-                                    false
-                                } else if !is_burn_only && ex_is_burn {
-                                    true
-                                } else {
-                                    uids.len() > ex_uids.len()
-                                }
-                            }
-                        };
-                        if replace {
-                            best_per_mechanism.insert(*mid, (uids.clone(), vals.clone()));
-                        }
-                    }
-                    let mut result = Vec::new();
-                    for (mid, (uids, vals)) in best_per_mechanism {
-                        info!(
-                            "Selected weights for mechanism {}: {} UIDs",
-                            mid,
-                            uids.len()
-                        );
-                        debug!("  UIDs: {:?}, Weights: {:?}", uids, vals);
-                        result.push((mid, uids, vals));
-                    }
-                    if result.is_empty() {
+                let weights_to_submit: Vec<(u8, Vec<u16>, Vec<u16>)> =
+                    if mechanism_weights.is_empty() {
                         let mechanism_id = {
                             let cs = chain_state.read();
                             cs.mechanism_configs.keys().next().copied().unwrap_or(0u8)
                         };
+                        info!("No weights - submitting burn weights to UID 0");
                         vec![(mechanism_id, vec![0u16], vec![65535u16])]
                     } else {
-                        result
-                    }
-                };
-
-                // Fallback: if all weights are burn-only, try fetching from
-                // the primary validator's RPC (chain.platform.network).
-                let all_burn_only = weights_to_submit
-                    .iter()
-                    .all(|(_, uids, _)| uids.len() == 1 && uids[0] == 0);
-                let weights_to_submit = if all_burn_only {
-                    info!("All local weights are burn-only, attempting HTTP fallback from chain.platform.network");
-                    match fetch_remote_weights().await {
-                        Ok(remote) if !remote.is_empty() => {
+                        use std::collections::BTreeMap;
+                        let mut best_per_mechanism: BTreeMap<u8, (Vec<u16>, Vec<u16>)> =
+                            BTreeMap::new();
+                        for (mid, uids, vals) in &mechanism_weights {
+                            let is_burn_only = uids.len() == 1 && uids[0] == 0;
+                            let existing = best_per_mechanism.get(mid);
+                            let replace = match existing {
+                                None => true,
+                                Some((ex_uids, _)) => {
+                                    let ex_is_burn = ex_uids.len() == 1 && ex_uids[0] == 0;
+                                    // Prefer real weights over burn; among real, prefer more UIDs
+                                    if is_burn_only && !ex_is_burn {
+                                        false
+                                    } else if !is_burn_only && ex_is_burn {
+                                        true
+                                    } else {
+                                        uids.len() > ex_uids.len()
+                                    }
+                                }
+                            };
+                            if replace {
+                                best_per_mechanism.insert(*mid, (uids.clone(), vals.clone()));
+                            }
+                        }
+                        let mut result = Vec::new();
+                        for (mid, (uids, vals)) in best_per_mechanism {
                             info!(
-                                "Fetched {} mechanism weight entries from remote",
-                                remote.len()
+                                "Selected weights for mechanism {}: {} UIDs",
+                                mid,
+                                uids.len()
                             );
-                            remote
+                            debug!("  UIDs: {:?}, Weights: {:?}", uids, vals);
+                            result.push((mid, uids, vals));
                         }
-                        Ok(_) => {
-                            warn!("Remote returned empty weights, using local burn-only");
-                            weights_to_submit
+                        if result.is_empty() {
+                            let mechanism_id = {
+                                let cs = chain_state.read();
+                                cs.mechanism_configs.keys().next().copied().unwrap_or(0u8)
+                            };
+                            vec![(mechanism_id, vec![0u16], vec![65535u16])]
+                        } else {
+                            result
                         }
-                        Err(e) => {
-                            warn!(
-                                "Failed to fetch remote weights: {}, using local burn-only",
-                                e
-                            );
-                            weights_to_submit
-                        }
-                    }
-                } else {
-                    weights_to_submit
-                };
+                    };
+
+                // No remote fallback -- each validator must compute weights
+                // independently from consensus storage to ensure vTrust convergence.
 
                 // Store computed weights in chain state for the subnet_getWeights RPC
                 {

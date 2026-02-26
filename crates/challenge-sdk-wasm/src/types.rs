@@ -212,3 +212,16 @@ pub struct WasmSyncResult {
     pub total_pending_issues: u32,
     pub sync_timestamp: i64,
 }
+
+/// Bitflags indicating which WASM functions should be deduplicated.
+///
+/// When a flag is set, the runtime will skip concurrent calls to that function
+/// for the same challenge, returning a default/empty result instead.
+pub struct DedupFlags;
+
+impl DedupFlags {
+    pub const NONE: i32 = 0;
+    pub const SYNC: i32 = 1 << 0;
+    pub const GET_WEIGHTS: i32 = 1 << 1;
+    pub const EVALUATE: i32 = 1 << 2;
+}

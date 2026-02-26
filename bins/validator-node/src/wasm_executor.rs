@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
-use platform_challenge_sdk_wasm::{EvaluationInput, EvaluationOutput, WeightEntry};
+use platform_challenge_sdk_wasm::{DedupFlags, EvaluationInput, EvaluationOutput, WeightEntry};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info};
@@ -72,10 +73,63 @@ pub struct ExecutionMetrics {
     pub fuel_consumed: Option<u64>,
 }
 
+/// Per-challenge deduplication state. Each function that the WASM module
+/// requested deduplication for gets an [`AtomicBool`] guard.
+struct DedupState {
+    flags: i32,
+    sync_running: AtomicBool,
+    get_weights_running: AtomicBool,
+    evaluate_running: AtomicBool,
+}
+
+impl DedupState {
+    fn new(flags: i32) -> Self {
+        Self {
+            flags,
+            sync_running: AtomicBool::new(false),
+            get_weights_running: AtomicBool::new(false),
+            evaluate_running: AtomicBool::new(false),
+        }
+    }
+
+    fn try_acquire(&self, flag: i32) -> Option<DedupGuard<'_>> {
+        if self.flags & flag == 0 {
+            return Some(DedupGuard { atom: None });
+        }
+        let atom = match flag {
+            DedupFlags::SYNC => &self.sync_running,
+            DedupFlags::GET_WEIGHTS => &self.get_weights_running,
+            DedupFlags::EVALUATE => &self.evaluate_running,
+            _ => return Some(DedupGuard { atom: None }),
+        };
+        if atom
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            Some(DedupGuard { atom: Some(atom) })
+        } else {
+            None
+        }
+    }
+}
+
+struct DedupGuard<'a> {
+    atom: Option<&'a AtomicBool>,
+}
+
+impl Drop for DedupGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(atom) = self.atom {
+            atom.store(false, Ordering::Release);
+        }
+    }
+}
+
 pub struct WasmChallengeExecutor {
     runtime: WasmRuntime,
     config: WasmExecutorConfig,
     module_cache: RwLock<HashMap<String, Arc<WasmModule>>>,
+    dedup_state: RwLock<HashMap<String, Arc<DedupState>>>,
 }
 
 impl WasmChallengeExecutor {
@@ -101,7 +155,47 @@ impl WasmChallengeExecutor {
             runtime,
             config,
             module_cache: RwLock::new(HashMap::new()),
+            dedup_state: RwLock::new(HashMap::new()),
         })
+    }
+
+    fn get_or_init_dedup(&self, challenge_id: &str, module: &WasmModule) -> Arc<DedupState> {
+        {
+            let cache = self.dedup_state.read();
+            if let Some(state) = cache.get(challenge_id) {
+                return Arc::clone(state);
+            }
+        }
+        let flags = self.query_dedup_flags(module);
+        let state = Arc::new(DedupState::new(flags));
+        let mut cache = self.dedup_state.write();
+        cache
+            .entry(challenge_id.to_string())
+            .or_insert_with(|| Arc::clone(&state));
+        Arc::clone(cache.get(challenge_id).unwrap())
+    }
+
+    fn query_dedup_flags(&self, module: &WasmModule) -> i32 {
+        let instance_config = InstanceConfig {
+            challenge_id: "dedup-probe".to_string(),
+            validator_id: "validator".to_string(),
+            storage_host_config: self.config.storage_host_config.clone(),
+            storage_backend: Arc::clone(&self.config.storage_backend),
+            ..Default::default()
+        };
+        let mut instance = match self.runtime.instantiate(module, instance_config, None) {
+            Ok(i) => i,
+            Err(_) => return DedupFlags::NONE,
+        };
+        match instance.call_return_i32("get_dedup_flags") {
+            Ok(flags) => {
+                if flags != 0 {
+                    info!(flags, "WASM module declares dedup flags");
+                }
+                flags
+            }
+            Err(_) => DedupFlags::NONE,
+        }
     }
 
     pub fn execute_evaluation(
@@ -136,6 +230,24 @@ impl WasmChallengeExecutor {
         let module = self
             .load_module(module_path)
             .context("Failed to load WASM module")?;
+
+        let dedup = self.get_or_init_dedup(module_path, &module);
+        let _guard = match dedup.try_acquire(DedupFlags::EVALUATE) {
+            Some(g) => g,
+            None => {
+                debug!(module = module_path, "evaluate skipped: already running");
+                let metrics = ExecutionMetrics {
+                    execution_time_ms: 0,
+                    memory_used_bytes: 0,
+                    network_requests_made: 0,
+                    fuel_consumed: None,
+                };
+                return Ok((
+                    EvaluationOutput::failure("skipped: already running"),
+                    metrics,
+                ));
+            }
+        };
 
         let input = EvaluationInput {
             agent_data: agent_data.to_vec(),
@@ -941,6 +1053,15 @@ impl WasmChallengeExecutor {
             .load_module(module_path)
             .context("Failed to load WASM module")?;
 
+        let dedup = self.get_or_init_dedup(module_path, &module);
+        let _guard = match dedup.try_acquire(DedupFlags::GET_WEIGHTS) {
+            Some(g) => g,
+            None => {
+                debug!(module = module_path, "get_weights skipped: already running");
+                return Ok(Vec::new());
+            }
+        };
+
         let instance_config = InstanceConfig {
             challenge_id: module_path.to_string(),
             validator_id: "validator".to_string(),
@@ -1029,6 +1150,22 @@ impl WasmChallengeExecutor {
         let module = self
             .load_module(module_path)
             .context("Failed to load WASM module")?;
+
+        let dedup = self.get_or_init_dedup(module_path, &module);
+        let _guard = match dedup.try_acquire(DedupFlags::SYNC) {
+            Some(g) => g,
+            None => {
+                debug!(module = module_path, "sync skipped: already running");
+                return Ok(platform_challenge_sdk_wasm::WasmSyncResult {
+                    leaderboard_hash: [0u8; 32],
+                    total_users: 0,
+                    total_valid_issues: 0,
+                    total_invalid_issues: 0,
+                    total_pending_issues: 0,
+                    sync_timestamp: 0,
+                });
+            }
+        };
 
         let instance_config = InstanceConfig {
             challenge_id: module_path.to_string(),
@@ -1187,6 +1324,7 @@ impl WasmChallengeExecutor {
         if cache.remove(module_path).is_some() {
             info!(module = module_path, "WASM module cache entry invalidated");
         }
+        self.dedup_state.write().remove(module_path);
     }
 
     #[allow(dead_code)]

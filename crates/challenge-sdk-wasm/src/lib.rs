@@ -12,10 +12,11 @@ pub use types::{
     score_f64_scaled, SandboxExecRequest, SandboxExecResponse, TaskDefinition, TaskResult,
 };
 pub use types::{ContainerRunRequest, ContainerRunResponse};
-pub use types::{EvaluationInput, EvaluationOutput};
 pub use types::{
-    WasmRouteDefinition, WasmRouteRequest, WasmRouteResponse, WasmSyncResult, WeightEntry,
+    DedupFlags, WasmRouteDefinition, WasmRouteRequest, WasmRouteResponse, WasmSyncResult,
+    WeightEntry,
 };
+pub use types::{EvaluationInput, EvaluationOutput};
 
 pub trait Challenge {
     fn name(&self) -> &'static str;
@@ -70,6 +71,14 @@ pub trait Challenge {
     /// The default implementation returns an empty vector.
     fn sync(&self) -> alloc::vec::Vec<u8> {
         alloc::vec::Vec::new()
+    }
+
+    /// Return a bitmask of [`DedupFlags`] indicating which functions should be
+    /// deduplicated. When set, the runtime skips concurrent calls to that
+    /// function for the same challenge, returning an empty result instead.
+    /// The default returns `DedupFlags::NONE` (no deduplication).
+    fn dedup_flags(&self) -> i32 {
+        DedupFlags::NONE
     }
 }
 
@@ -335,6 +344,11 @@ macro_rules! register_challenge {
                 core::ptr::copy_nonoverlapping(output.as_ptr(), ptr, output.len());
             }
             $crate::pack_ptr_len(ptr as i32, output.len() as i32)
+        }
+
+        #[no_mangle]
+        pub extern "C" fn get_dedup_flags() -> i32 {
+            <$ty as $crate::Challenge>::dedup_flags(&_CHALLENGE)
         }
     };
 }
