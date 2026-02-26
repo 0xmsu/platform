@@ -1048,16 +1048,22 @@ async fn main() -> Result<()> {
                 // Force metagraph refresh before weight submission to avoid stale hotkey->UID mappings
                 if matches!(event, BlockSyncEvent::CommitWindowOpen { .. }) {
                     if let Some(bittensor_client) = bittensor_client_for_metagraph.as_ref() {
-                        match sync_metagraph(bittensor_client, netuid).await {
-                            Ok(mg) => {
+                        match tokio::time::timeout(
+                            Duration::from_secs(15),
+                            sync_metagraph(bittensor_client, netuid),
+                        ).await {
+                            Ok(Ok(mg)) => {
                                 info!("Pre-commit metagraph refresh: {} neurons", mg.n);
                                 update_validator_set_from_metagraph(&mg, &validator_set, &chain_state, &valid_voters, &state_root_consensus, &state_manager);
                                 if let Some(sc) = subtensor_client.as_mut() {
                                     sc.set_metagraph(mg);
                                 }
                             }
-                            Err(e) => {
-                                warn!("Pre-commit metagraph refresh failed: {}. Using cached metagraph.", e);
+                            Ok(Err(e)) => {
+                                warn!("Pre-commit metagraph refresh failed: {}. Using cached.", e);
+                            }
+                            Err(_) => {
+                                warn!("Pre-commit metagraph refresh timed out (15s). Using cached.");
                             }
                         }
                     }
@@ -1688,6 +1694,23 @@ async fn main() -> Result<()> {
                     if !has_challenges {
                         warn!("Startup weight submission skipped: no active challenges loaded");
                     } else {
+                        // Refresh metagraph before startup weight submission
+                        if let Some(bittensor_client) = bittensor_client_for_metagraph.as_ref() {
+                            match tokio::time::timeout(
+                                Duration::from_secs(15),
+                                sync_metagraph(bittensor_client, netuid),
+                            ).await {
+                                Ok(Ok(mg)) => {
+                                    info!("Startup metagraph refresh: {} neurons", mg.n);
+                                    update_validator_set_from_metagraph(&mg, &validator_set, &chain_state, &valid_voters, &state_root_consensus, &state_manager);
+                                    if let Some(sc) = subtensor_client.as_mut() {
+                                        sc.set_metagraph(mg);
+                                    }
+                                }
+                                Ok(Err(e)) => warn!("Startup metagraph refresh failed: {}", e),
+                                Err(_) => warn!("Startup metagraph refresh timed out after 15s"),
+                            }
+                        }
                         let tempo = 360u64;
                         let netuid_plus_one = (netuid as u64).saturating_add(1);
                         let epoch = current_block.saturating_add(netuid_plus_one) / (tempo + 1);

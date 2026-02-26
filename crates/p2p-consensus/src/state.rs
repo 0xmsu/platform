@@ -465,15 +465,19 @@ impl ChainState {
     pub fn update_hash(&mut self) {
         self.last_updated = chrono::Utc::now().timestamp_millis();
 
-        // Hash actual content (not just counts) so divergent state is detectable
+        // Hash actual content so divergent state is detectable
         #[derive(Serialize)]
         struct HashInput {
             sequence: SequenceNumber,
             epoch: u64,
             netuid: u16,
+            bootstrap_active: bool,
+            bittensor_block: u64,
             validators: Vec<(String, u64)>,
             challenges: Vec<String>,
             pending_ids: Vec<String>,
+            weight_voter_count: usize,
+            historical_weight_epochs: Vec<u64>,
         }
 
         let mut validators: Vec<(String, u64)> = self
@@ -489,13 +493,27 @@ impl ChainState {
         let mut pending_ids: Vec<String> = self.pending_evaluations.keys().cloned().collect();
         pending_ids.sort();
 
+        let weight_voter_count = self
+            .weight_votes
+            .as_ref()
+            .map(|wv| wv.votes.len())
+            .unwrap_or(0);
+
+        let mut historical_weight_epochs: Vec<u64> =
+            self.historical_weights.keys().copied().collect();
+        historical_weight_epochs.sort();
+
         let input = HashInput {
             sequence: self.sequence,
             epoch: self.epoch,
             netuid: self.netuid,
+            bootstrap_active: self.bootstrap_active,
+            bittensor_block: self.bittensor_block,
             validators,
             challenges,
             pending_ids,
+            weight_voter_count,
+            historical_weight_epochs,
         };
 
         self.state_hash = hash_data(&input).unwrap_or([0u8; 32]);

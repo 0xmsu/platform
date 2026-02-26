@@ -314,10 +314,13 @@ impl ChainState {
             block_height: BlockHeight,
             sudo_key: &'a Hotkey,
             mutation_sequence: u64,
+            paused: bool,
+            config: &'a NetworkConfig,
             validators: Vec<String>,
             challenge_ids: Vec<String>,
             wasm_challenges: Vec<ChallengeHashEntry>,
             mechanism_configs: Vec<(u8, String)>,
+            challenge_weights: Vec<(String, String)>,
         }
 
         let mut validators: Vec<String> = self.validators.keys().map(|h| h.to_ss58()).collect();
@@ -346,14 +349,24 @@ impl ChainState {
             .collect();
         mechanism_configs.sort_by_key(|(k, _)| *k);
 
+        let mut challenge_weights: Vec<(String, String)> = self
+            .challenge_weights
+            .iter()
+            .map(|(id, alloc)| (id.to_string(), format!("{:?}", alloc)))
+            .collect();
+        challenge_weights.sort_by(|a, b| a.0.cmp(&b.0));
+
         let input = HashInput {
             block_height: self.block_height,
             sudo_key: &self.sudo_key,
             mutation_sequence: self.mutation_sequence,
+            paused: self.paused,
+            config: &self.config,
             validators,
             challenge_ids,
             wasm_challenges,
             mechanism_configs,
+            challenge_weights,
         };
 
         self.state_hash = hash_data(&input).unwrap_or([0u8; 32]);
