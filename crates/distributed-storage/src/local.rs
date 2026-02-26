@@ -95,9 +95,13 @@ pub struct LocalStorage {
 }
 
 impl LocalStorage {
-    /// Open or create a local storage at the given path
+    /// Open or create a local storage at the given path.
+    /// Sled cache is limited to 256MB to bound memory usage.
     pub fn open<P: AsRef<Path>>(path: P, node_id: String) -> StorageResult<Self> {
-        let db = sled::open(path)?;
+        let db = sled::Config::new()
+            .path(path)
+            .cache_capacity(256 * 1024 * 1024) // 256MB cache limit
+            .open()?;
         let data_tree = db.open_tree("data")?;
         let index_tree = db.open_tree("index")?;
         let block_index_tree = db.open_tree("block_index")?;

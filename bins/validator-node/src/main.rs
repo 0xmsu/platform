@@ -1850,6 +1850,13 @@ async fn main() -> Result<()> {
                     info!("P2P state persisted on shutdown");
                 }
 
+                // Flush storage to disk to ensure all writes are durable
+                if let Err(e) = local_storage.flush_if_dirty().await {
+                    error!("Failed to flush storage on shutdown: {}", e);
+                } else {
+                    info!("Storage flushed to disk on shutdown");
+                }
+
                 // Create checkpoint
                 if let Some(handler) = shutdown_handler.as_mut() {
                     if let Err(e) = handler.create_checkpoint() {

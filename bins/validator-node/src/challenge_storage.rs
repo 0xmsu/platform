@@ -5,6 +5,7 @@ use platform_distributed_storage::{
 };
 use platform_p2p_consensus::{P2PCommand, P2PMessage, StorageProposal, StorageProposalMessage};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use wasm_runtime_interface::storage::{StorageBackend, StorageHostError};
@@ -12,11 +13,18 @@ use wasm_runtime_interface::storage::{StorageBackend, StorageHostError};
 /// Channel for local storage proposals (proposer adds to own state)
 pub type LocalProposalSender = mpsc::Sender<StorageProposal>;
 
+/// Pending write value: Some(data) = write, None = delete
+type PendingValue = Option<Vec<u8>>;
+
 pub struct ChallengeStorageBackend {
     storage: Arc<dyn DistributedStore>,
     p2p_tx: Option<mpsc::Sender<P2PCommand>>,
     local_proposal_tx: Option<LocalProposalSender>,
     keypair: Option<Keypair>,
+    /// Write-through cache for read-your-own-writes during a sync cycle.
+    /// Key: (challenge_id, hex-encoded key). Value: pending data (None = delete).
+    /// Cleared via `clear_pending_writes()` after each sync cycle completes.
+    pending_writes: parking_lot::RwLock<HashMap<(String, String), PendingValue>>,
 }
 
 impl ChallengeStorageBackend {
@@ -27,6 +35,7 @@ impl ChallengeStorageBackend {
             p2p_tx: None,
             local_proposal_tx: None,
             keypair: None,
+            pending_writes: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 
@@ -41,7 +50,14 @@ impl ChallengeStorageBackend {
             p2p_tx: Some(p2p_tx),
             local_proposal_tx: Some(local_proposal_tx),
             keypair: Some(keypair),
+            pending_writes: parking_lot::RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Clear the pending writes cache. Call after each sync cycle completes
+    /// so that subsequent reads go through consensus-confirmed storage.
+    pub fn clear_pending_writes(&self) {
+        self.pending_writes.write().clear();
     }
 }
 
@@ -54,6 +70,12 @@ fn build_challenge_storage_key(challenge_id: &str, key: &[u8]) -> DStorageKey {
 
 impl StorageBackend for ChallengeStorageBackend {
     fn get(&self, challenge_id: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StorageHostError> {
+        // Check pending writes cache first (read-your-own-writes during sync)
+        let cache_key = (challenge_id.to_string(), hex::encode(key));
+        if let Some(pending) = self.pending_writes.read().get(&cache_key) {
+            return Ok(pending.clone());
+        }
+
         let storage_key = build_challenge_storage_key(challenge_id, key);
         let result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
@@ -76,9 +98,19 @@ impl StorageBackend for ChallengeStorageBackend {
         hasher.update(value);
         let proposal_id: [u8; 32] = hasher.finalize().into();
 
-        // DO NOT write locally here - data is only written after P2P consensus is reached.
-        // All validators (including the proposer) write in the StorageVote handler when
-        // 2f+1 votes approve. This ensures consistency across all nodes.
+        // Cache the write locally so WASM can read-its-own-writes during the
+        // current sync cycle. This cache is NOT persisted to storage and does NOT
+        // affect other validators. Actual storage write happens after P2P consensus.
+        // The cache is cleared after each sync cycle via clear_pending_writes().
+        {
+            let cache_key = (challenge_id.to_string(), hex::encode(key));
+            let cache_value = if value.is_empty() {
+                None // delete
+            } else {
+                Some(value.to_vec())
+            };
+            self.pending_writes.write().insert(cache_key, cache_value);
+        }
 
         // Broadcast via P2P for consensus
         if let (Some(tx), Some(kp)) = (&self.p2p_tx, &self.keypair) {

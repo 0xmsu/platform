@@ -684,13 +684,23 @@ impl<S: DistributedStore + 'static> ValidatedStorage<S> {
         {
             let mut committed = self.committed.write().await;
             committed.insert(*proposal_id, result.clone());
+            // Evict old committed results to bound memory (keep last 1000)
+            if committed.len() > 1000 {
+                let oldest: Vec<[u8; 32]> = committed
+                    .iter()
+                    .take(committed.len() - 1000)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in oldest {
+                    committed.remove(&id);
+                }
+            }
         }
 
+        // Remove committed proposal from pending to free memory
         {
             let mut proposals = self.proposals.write().await;
-            if let Some(state) = proposals.get_mut(proposal_id) {
-                state.consensus_result = Some(result.clone());
-            }
+            proposals.remove(proposal_id);
         }
 
         Ok(result)
@@ -746,9 +756,9 @@ impl<S: DistributedStore + 'static> ValidatedStorage<S> {
         let timeout = self.config.proposal_timeout_ms;
         let before = proposals.len();
 
-        proposals.retain(|_, state| {
-            !state.proposal.is_expired(timeout) || state.consensus_result.is_some()
-        });
+        // Remove expired proposals regardless of consensus state.
+        // Committed proposals are already removed in commit_write().
+        proposals.retain(|_, state| !state.proposal.is_expired(timeout));
 
         let removed = before - proposals.len();
         if removed > 0 {

@@ -315,6 +315,10 @@ pub trait StorageBackend: Send + Sync {
         let _ = (challenge_id, prefix);
         Ok(0)
     }
+
+    /// Clear any pending write cache. Called after sync cycles complete
+    /// so subsequent reads reflect only consensus-confirmed data.
+    fn clear_pending_writes(&self) {}
 }
 
 pub struct NoopStorageBackend;

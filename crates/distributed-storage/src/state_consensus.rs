@@ -834,9 +834,16 @@ impl StateRootConsensus {
     }
 
     /// Store a completed consensus result.
+    /// Prunes old results to bound memory (keeps last 100 blocks).
     pub fn store_completed(&mut self, result: ConsensusResult) {
         let block = result.block_number;
         self.completed.insert(block, result);
+
+        // Prune old completed results to prevent unbounded growth
+        if self.completed.len() > 100 {
+            let cutoff = block.saturating_sub(100);
+            self.completed.retain(|b, _| *b > cutoff);
+        }
     }
 }
 

@@ -1047,6 +1047,8 @@ impl WasmChallengeExecutor {
         block_height: u64,
         epoch: u64,
     ) -> Result<Vec<platform_challenge_sdk::WeightAssignment>> {
+        // Ensure get_weights reads only consensus-confirmed data, not pending sync writes
+        self.config.storage_backend.clear_pending_writes();
         let start = Instant::now();
 
         let module = self
@@ -1220,6 +1222,10 @@ impl WasmChallengeExecutor {
             execution_time_ms = start.elapsed().as_millis() as u64,
             "WASM sync completed"
         );
+
+        // Clear the pending writes cache so subsequent reads (e.g., get_weights)
+        // only see consensus-confirmed data, not transient sync writes.
+        self.config.storage_backend.clear_pending_writes();
 
         Ok(sync_result)
     }
