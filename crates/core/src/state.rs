@@ -443,12 +443,10 @@ impl ChainState {
             SudoAction::AddValidator { info } => {
                 tracing::info!(hotkey = %info.hotkey, "Sudo: adding validator");
                 self.add_validator(info.clone())?;
-                return Ok(());
             }
             SudoAction::RemoveValidator { hotkey } => {
                 tracing::info!(hotkey = %hotkey, "Sudo: removing validator");
                 self.remove_validator(hotkey);
-                return Ok(());
             }
             SudoAction::EmergencyPause { reason } => {
                 tracing::warn!(reason = %reason, "Sudo: EMERGENCY PAUSE");
@@ -462,7 +460,11 @@ impl ChainState {
             }
             SudoAction::ForceStateUpdate { state } => {
                 tracing::warn!("Sudo: FORCE STATE UPDATE - replacing entire state");
+                let prev_seq = self.mutation_sequence;
                 *self = state.clone();
+                // Ensure mutation_sequence advances so peers accept the update
+                self.mutation_sequence = self.mutation_sequence.max(prev_seq) + 1;
+                self.update_hash();
                 return Ok(());
             }
             SudoAction::RenameChallenge {
@@ -674,29 +676,22 @@ impl ChainState {
             return false;
         }
 
-        // Merge WASM challenge configs: update existing entries too (not just insert)
-        // so that sudo actions (SetEmission, SetMechanism) propagate correctly.
-        for (id, config) in &peer_state.wasm_challenge_configs {
-            self.wasm_challenge_configs.insert(*id, config.clone());
-        }
+        // Replace (not merge) to ensure deleted entries propagate.
+        // The peer with higher mutation_sequence is authoritative.
+        self.wasm_challenge_configs = peer_state.wasm_challenge_configs.clone();
+        self.challenge_routes = peer_state.challenge_routes.clone();
+        self.mechanism_configs = peer_state.mechanism_configs.clone();
+        self.challenge_weights = peer_state.challenge_weights.clone();
 
-        for (id, routes) in &peer_state.challenge_routes {
-            self.challenge_routes.insert(*id, routes.clone());
-        }
-
-        // Merge mechanism configs
-        for (mid, mconfig) in &peer_state.mechanism_configs {
-            self.mechanism_configs.insert(*mid, mconfig.clone());
-        }
-
-        // Merge challenge weight allocations
-        for (id, alloc) in &peer_state.challenge_weights {
-            self.challenge_weights.insert(*id, alloc.clone());
-        }
-
-        // Sync paused state from higher-sequence peer
+        // Sync sudo-mutable fields
+        self.config = peer_state.config.clone();
+        self.sudo_key = peer_state.sudo_key.clone();
+        self.required_version = peer_state.required_version.clone();
         self.paused = peer_state.paused;
         self.pause_reason = peer_state.pause_reason.clone();
+
+        // Sync legacy challenges
+        self.challenges = peer_state.challenges.clone();
 
         self.mutation_sequence = peer_state.mutation_sequence;
         self.update_hash();

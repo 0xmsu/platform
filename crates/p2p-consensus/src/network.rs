@@ -146,8 +146,25 @@ impl PeerMapping {
     }
 
     pub fn insert(&self, peer_id: PeerId, hotkey: Hotkey) {
-        self.peer_to_hotkey.write().insert(peer_id, hotkey.clone());
-        self.hotkey_to_peer.write().insert(hotkey, peer_id);
+        // Clean stale mappings to keep both maps consistent
+        let mut p2h = self.peer_to_hotkey.write();
+        let mut h2p = self.hotkey_to_peer.write();
+
+        // If this peer had a different hotkey before, remove old reverse entry
+        if let Some(old_hotkey) = p2h.get(&peer_id) {
+            if *old_hotkey != hotkey {
+                h2p.remove(old_hotkey);
+            }
+        }
+        // If this hotkey was on a different peer before, remove old reverse entry
+        if let Some(&old_peer) = h2p.get(&hotkey) {
+            if old_peer != peer_id {
+                p2h.remove(&old_peer);
+            }
+        }
+
+        p2h.insert(peer_id, hotkey.clone());
+        h2p.insert(hotkey, peer_id);
     }
 
     pub fn get_hotkey(&self, peer_id: &PeerId) -> Option<Hotkey> {
@@ -245,7 +262,13 @@ impl P2PNetwork {
             peer_mapping: Arc::new(PeerMapping::new()),
             validator_set,
             event_tx,
-            nonce: RwLock::new(0),
+            // Initialize nonce from timestamp to avoid collisions with pre-restart nonces
+            nonce: RwLock::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            ),
             seen_nonces: RwLock::new(HashMap::new()),
             message_timestamps: RwLock::new(HashMap::new()),
         })
@@ -1556,9 +1579,8 @@ mod tests {
         assert_eq!(mapping.get_hotkey(&peer_id), Some(hotkey2.clone()));
         assert_eq!(mapping.get_peer(&hotkey2), Some(peer_id));
 
-        // Old hotkey should still point to the peer (due to current impl not cleaning old entry)
-        // This tests the actual behavior - hotkey_to_peer is not cleaned on overwrite
-        assert_eq!(mapping.get_peer(&hotkey1), Some(peer_id));
+        // Old hotkey should be cleaned up and no longer resolve
+        assert_eq!(mapping.get_peer(&hotkey1), None);
     }
 
     #[test]

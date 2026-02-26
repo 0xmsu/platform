@@ -117,7 +117,13 @@ impl StorageBackend for ChallengeStorageBackend {
                 value_len = value.len(),
                 "Broadcasting storage proposal via P2P"
             );
-            let _ = tx.try_send(P2PCommand::Broadcast(msg));
+            if let Err(e) = tx.try_send(P2PCommand::Broadcast(msg)) {
+                tracing::warn!(
+                    proposal_id = %hex::encode(&proposal_id[..8]),
+                    error = %e,
+                    "P2P broadcast channel full or closed, proposal may not reach consensus"
+                );
+            }
 
             // Also add the proposal to our local state for vote tracking
             if let Some(local_tx) = &self.local_proposal_tx {
@@ -131,7 +137,13 @@ impl StorageBackend for ChallengeStorageBackend {
                     votes: std::collections::HashMap::new(),
                     finalized: false,
                 };
-                let _ = local_tx.try_send(local_proposal);
+                if let Err(e) = local_tx.try_send(local_proposal) {
+                    tracing::warn!(
+                        proposal_id = %hex::encode(&proposal_id[..8]),
+                        error = %e,
+                        "Local proposal channel full, vote tracking may be incomplete"
+                    );
+                }
             }
         } else {
             // No P2P configured - write locally for single-node/test mode
@@ -150,11 +162,18 @@ impl StorageBackend for ChallengeStorageBackend {
     }
 
     fn delete(&self, challenge_id: &str, key: &[u8]) -> Result<bool, StorageHostError> {
-        let storage_key = build_challenge_storage_key(challenge_id, key);
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.storage.delete(&storage_key))
-        })
-        .map_err(|e| StorageHostError::StorageError(e.to_string()))
+        // Route deletes through P2P consensus by proposing an empty value.
+        // The StorageVote handler in main.rs checks for empty value and calls delete.
+        if self.p2p_tx.is_some() {
+            self.propose_write(challenge_id, key, &[])?;
+            Ok(true)
+        } else {
+            let storage_key = build_challenge_storage_key(challenge_id, key);
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(self.storage.delete(&storage_key))
+            })
+            .map_err(|e| StorageHostError::StorageError(e.to_string()))
+        }
     }
 
     fn get_cross(
@@ -211,11 +230,26 @@ impl StorageBackend for ChallengeStorageBackend {
         Ok(items)
     }
 
-    fn count_prefix(&self, challenge_id: &str, _prefix: &[u8]) -> Result<u64, StorageHostError> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.storage.count_by_namespace(challenge_id))
-        })
-        .map_err(|e| StorageHostError::StorageError(e.to_string()))
+    fn count_prefix(&self, challenge_id: &str, prefix: &[u8]) -> Result<u64, StorageHostError> {
+        if prefix.is_empty() {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(self.storage.count_by_namespace(challenge_id))
+            })
+            .map_err(|e| StorageHostError::StorageError(e.to_string()))
+        } else {
+            // Use list_prefix with a high limit to count matching keys
+            let hex_prefix = hex::encode(prefix);
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(self.storage.list_prefix(
+                    challenge_id,
+                    Some(hex_prefix.as_bytes()),
+                    u32::MAX as usize,
+                    None,
+                ))
+            })
+            .map_err(|e| StorageHostError::StorageError(e.to_string()))?;
+            Ok(result.items.len() as u64)
+        }
     }
 }

@@ -964,7 +964,27 @@ async fn main() -> Result<()> {
         }
     }
 
-    info!("Decentralized validator running. Press Ctrl+C to stop.");
+    info!("Decentralized validator running. Press Ctrl+C or send SIGTERM to stop.");
+
+    // Unified shutdown signal: Ctrl+C or SIGTERM (for Docker/systemd)
+    let shutdown_signal = async {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to install SIGTERM handler");
+            tokio::select! {
+                _ = ctrl_c => {},
+                _ = sigterm.recv() => {},
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.ok();
+        }
+    };
+    tokio::pin!(shutdown_signal);
 
     let netuid = args.netuid;
     let version_key = args.version_key;
@@ -1789,8 +1809,8 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Ctrl+C
-            _ = tokio::signal::ctrl_c() => {
+            // Ctrl+C or SIGTERM
+            _ = &mut shutdown_signal => {
                 info!("Received shutdown signal, persisting state...");
 
                 // Persist core state (wasm_challenge_configs, routes, validators)

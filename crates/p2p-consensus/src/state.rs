@@ -745,13 +745,13 @@ impl ChainState {
         removed
     }
 
-    /// Clean up old proposals (older than max_age_ms)
+    /// Clean up old or finalized proposals
     pub fn cleanup_old_proposals(&mut self, max_age_ms: i64) {
         let now = chrono::Utc::now().timestamp_millis();
         let old_proposals: Vec<[u8; 32]> = self
             .pending_storage_proposals
             .iter()
-            .filter(|(_, p)| now - p.timestamp > max_age_ms)
+            .filter(|(_, p)| p.finalized || now - p.timestamp > max_age_ms)
             .map(|(id, _)| *id)
             .collect();
 
@@ -829,13 +829,13 @@ impl ChainState {
         removed
     }
 
-    /// Clean up old state mutation proposals
+    /// Clean up old or finalized state mutation proposals
     pub fn cleanup_old_state_mutations(&mut self, max_age_ms: i64) {
         let now = chrono::Utc::now().timestamp_millis();
         let old: Vec<[u8; 32]> = self
             .pending_state_mutations
             .iter()
-            .filter(|(_, e)| now - e.timestamp > max_age_ms)
+            .filter(|(_, e)| e.finalized || now - e.timestamp > max_age_ms)
             .map(|(id, _)| *id)
             .collect();
         for id in old {
@@ -1007,16 +1007,8 @@ impl ChainState {
         });
 
         if votes.epoch == epoch && !votes.finalized {
-            // Merge with existing vote from same validator instead of overwriting
-            if let Some(existing) = votes.votes.get_mut(&validator) {
-                let mut uid_map: HashMap<u16, u16> = existing.iter().copied().collect();
-                for (uid, weight) in &weights {
-                    uid_map.insert(*uid, *weight);
-                }
-                *existing = uid_map.into_iter().collect();
-            } else {
-                votes.votes.insert(validator, weights);
-            }
+            // Replace entire vote atomically (not merge) to ensure vote integrity
+            votes.votes.insert(validator, weights);
             self.update_hash();
             Ok(())
         } else {
@@ -1047,16 +1039,8 @@ impl ChainState {
         });
 
         if votes.epoch == epoch && !votes.finalized {
-            // Merge with existing vote from same validator instead of overwriting
-            if let Some(existing) = votes.votes.get_mut(&validator) {
-                let mut uid_map: HashMap<u16, u16> = existing.iter().copied().collect();
-                for (uid, weight) in &weights {
-                    uid_map.insert(*uid, *weight);
-                }
-                *existing = uid_map.into_iter().collect();
-            } else {
-                votes.votes.insert(validator, weights);
-            }
+            // Replace entire vote atomically (not merge) to ensure vote integrity
+            votes.votes.insert(validator, weights);
             self.update_hash();
             Ok(())
         } else {
@@ -1146,17 +1130,19 @@ impl ChainState {
         self.epoch += 1;
         self.weight_votes = None;
 
-        // Prune old historical weights to prevent unbounded growth
+        // Prune old historical weights and completed evaluations to prevent unbounded growth
         if self.historical_weights.len() > Self::MAX_HISTORICAL_EPOCHS {
             let cutoff_epoch = self
                 .epoch
                 .saturating_sub(Self::MAX_HISTORICAL_EPOCHS as u64);
             self.historical_weights
                 .retain(|epoch, _| *epoch > cutoff_epoch);
+            self.completed_evaluations
+                .retain(|epoch, _| *epoch > cutoff_epoch);
             debug!(
                 retained_epochs = self.historical_weights.len(),
                 cutoff = cutoff_epoch,
-                "Pruned historical weights"
+                "Pruned historical weights and evaluations"
             );
         }
 
