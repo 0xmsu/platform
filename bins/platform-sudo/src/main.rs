@@ -37,9 +37,9 @@ enum Commands {
         /// Challenge ID (UUID format)
         #[arg(short, long)]
         id: String,
-        /// Challenge name
+        /// Challenge name (required to avoid UUID-only names)
         #[arg(short, long)]
-        name: Option<String>,
+        name: String,
     },
     /// Activate a challenge
     Activate {
@@ -199,7 +199,7 @@ impl SudoCli {
         &self,
         file: &PathBuf,
         challenge_id: &str,
-        name: Option<String>,
+        name: String,
     ) -> Result<()> {
         let wasm_bytes = std::fs::read(file).context("Failed to read WASM file")?;
 
@@ -222,7 +222,7 @@ impl SudoCli {
             action: "wasm_upload".to_string(),
             challenge_id: id_str.clone(),
             data: Some(base64::engine::general_purpose::STANDARD.encode(&wasm_bytes)),
-            name: name.or_else(|| Some(id_str.clone())),
+            name: Some(name),
             signature: hex::encode(&signature),
             timestamp,
         };
@@ -433,7 +433,7 @@ impl SudoCli {
                     match parts[0] {
                         "help" | "?" => {
                             println!("\nCommands:");
-                            println!("  upload <file> <challenge_id> [name]  - Upload WASM module");
+                            println!("  upload <file> <challenge_id> <name>   - Upload WASM module");
                             println!("  activate <challenge_id>              - Activate challenge");
                             println!(
                                 "  deactivate <challenge_id>            - Deactivate challenge"
@@ -446,10 +446,10 @@ impl SudoCli {
                             );
                             println!("  exit | quit                          - Exit CLI\n");
                         }
-                        "upload" if parts.len() >= 3 => {
+                        "upload" if parts.len() >= 4 => {
                             let file = PathBuf::from(parts[1]);
                             let id = parts[2];
-                            let name = parts.get(3).map(|s| s.to_string());
+                            let name = parts[3].to_string();
                             if let Err(e) = self.upload_wasm(&file, id, name).await {
                                 println!("Error: {}", e);
                             }

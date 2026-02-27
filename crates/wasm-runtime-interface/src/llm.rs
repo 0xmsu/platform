@@ -12,7 +12,7 @@
 use crate::runtime::{HostFunctionRegistrar, RuntimeState, WasmRuntimeError};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use tracing::warn;
+use tracing::{info, warn};
 use wasmtime::{Caller, Linker, Memory};
 
 const MAX_CHAT_REQUEST_SIZE: u64 = 4 * 1024 * 1024;
@@ -175,14 +175,17 @@ fn handle_chat_completion(
     }
 
     if !policy_available {
+        warn!("llm proxy: policy not available (disabled or no key)");
         return LlmHostStatus::Disabled.to_i32();
     }
 
     if requests_made >= max_requests {
+        warn!(requests_made, max_requests, "llm proxy: rate limited");
         return LlmHostStatus::RateLimited.to_i32();
     }
 
     if req_ptr < 0 || req_len < 0 || resp_ptr < 0 || resp_len < 0 {
+        warn!(req_ptr, req_len, resp_ptr, resp_len, "llm proxy: invalid pointers");
         return LlmHostStatus::InvalidRequest.to_i32();
     }
 
@@ -195,6 +198,7 @@ fn handle_chat_completion(
     };
 
     if request_bytes.len() as u64 > MAX_CHAT_REQUEST_SIZE {
+        warn!(size = request_bytes.len(), "llm proxy: request too large");
         return LlmHostStatus::InvalidRequest.to_i32();
     }
 
@@ -204,56 +208,77 @@ fn handle_chat_completion(
         let state = &caller.data().llm_state;
         api_key = match &state.policy.api_key {
             Some(k) => k.clone(),
-            None => return LlmHostStatus::Disabled.to_i32(),
+            None => {
+                warn!("llm proxy: no API key");
+                return LlmHostStatus::Disabled.to_i32();
+            }
         };
         endpoint = state.policy.endpoint.clone();
     }
 
-    // Deserialize the SDK request (bincode-encoded LlmRequest from challenge-sdk-wasm)
-    let sdk_req: SdkRequest = match bincode::deserialize(&request_bytes) {
-        Ok(r) => r,
-        Err(_) => return LlmHostStatus::InvalidRequest.to_i32(),
-    };
+    // Deserialize using the SDK types directly (same serde attributes including
+    // skip_serializing_if which bincode respects for serialization layout)
+    let wasm_req: platform_challenge_sdk_wasm::LlmRequest =
+        match bincode::deserialize(&request_bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                let preview: Vec<u8> = request_bytes.iter().take(64).copied().collect();
+                warn!(error = %e, req_len = request_bytes.len(), first_bytes = ?preview, "llm proxy: bincode deserialize failed");
+                return LlmHostStatus::InvalidRequest.to_i32();
+            }
+        };
+    info!("llm proxy: request decoded, model={}, messages={}", wasm_req.model, wasm_req.messages.len());
 
     // Validate model against allowed list
     {
         let state = &caller.data().llm_state;
         let allowed = &state.policy.allowed_models;
-        if !allowed.is_empty() && !allowed.contains(&sdk_req.model) {
-            warn!(model = %sdk_req.model, "llm proxy: model not in allowed list");
+        if !allowed.is_empty() && !allowed.contains(&wasm_req.model) {
+            warn!(model = %wasm_req.model, "llm proxy: model not in allowed list");
             return LlmHostStatus::InvalidRequest.to_i32();
         }
     }
 
-    // Build OpenAI-compatible JSON, force stream: false
+    // Convert SDK types to local types for build_openai_request
+    let sdk_req = convert_sdk_request(&wasm_req);
     let openai_json = build_openai_request(&sdk_req);
     let json_body = match serde_json::to_vec(&openai_json) {
         Ok(b) => b,
         Err(_) => return LlmHostStatus::InvalidRequest.to_i32(),
     };
 
-    // Forward to LLM endpoint
-    let client = reqwest::blocking::Client::new();
-    let http_response = match client
-        .post(&endpoint)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .body(json_body)
-        .timeout(std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS))
-        .send()
-    {
-        Ok(r) => r,
-        Err(err) => {
+    // Forward to LLM endpoint via a dedicated thread to avoid
+    // reqwest::blocking conflicts with the tokio async runtime.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let endpoint_clone = endpoint.clone();
+    let api_key_clone = api_key.clone();
+    let json_body_clone = json_body.clone();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<Vec<u8>, String> {
+            let client = reqwest::blocking::Client::new();
+            let resp = client
+                .post(&endpoint_clone)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", api_key_clone))
+                .body(json_body_clone)
+                .timeout(std::time::Duration::from_secs(LLM_REQUEST_TIMEOUT_SECS))
+                .send()
+                .map_err(|e| format!("HTTP request failed: {}", e))?;
+            let bytes = resp.bytes().map_err(|e| format!("read body failed: {}", e))?;
+            Ok(bytes.to_vec())
+        })();
+        let _ = tx.send(result);
+    });
+
+    let response_body = match rx.recv() {
+        Ok(Ok(body)) => body,
+        Ok(Err(err)) => {
             warn!(error = %err, "llm proxy: HTTP request failed");
             return LlmHostStatus::ApiError.to_i32();
         }
-    };
-
-    let response_body = match http_response.bytes() {
-        Ok(b) => b.to_vec(),
         Err(err) => {
-            warn!(error = %err, "llm proxy: failed to read response body");
-            return LlmHostStatus::ApiError.to_i32();
+            warn!(error = %err, "llm proxy: thread communication failed");
+            return LlmHostStatus::InternalError.to_i32();
         }
     };
 
@@ -291,14 +316,23 @@ fn handle_chat_completion(
 struct SdkRequest {
     model: String,
     messages: Vec<SdkMessage>,
+    #[serde(default)]
     max_tokens: Option<u32>,
+    #[serde(default)]
     temperature: Option<f32>,
+    #[serde(default)]
     top_p: Option<f32>,
+    #[serde(default)]
     frequency_penalty: Option<f32>,
+    #[serde(default)]
     presence_penalty: Option<f32>,
+    #[serde(default)]
     stop: Option<Vec<String>>,
+    #[serde(default)]
     tools: Option<Vec<SdkTool>>,
+    #[serde(default)]
     tool_choice: Option<SdkToolChoice>,
+    #[serde(default)]
     response_format: Option<SdkResponseFormat>,
 }
 
@@ -306,8 +340,11 @@ struct SdkRequest {
 struct SdkMessage {
     role: String,
     content: Option<String>,
+    #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
     tool_calls: Option<Vec<SdkToolCall>>,
+    #[serde(default)]
     tool_call_id: Option<String>,
 }
 
@@ -397,6 +434,49 @@ struct OpenAiMessage {
     tool_calls: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+}
+
+fn convert_sdk_request(wasm: &platform_challenge_sdk_wasm::LlmRequest) -> SdkRequest {
+    use platform_challenge_sdk_wasm::llm_types::ToolChoice as WasmTC;
+    SdkRequest {
+        model: wasm.model.clone(),
+        messages: wasm.messages.iter().map(|m| SdkMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+            name: m.name.clone(),
+            tool_calls: m.tool_calls.as_ref().map(|tcs| tcs.iter().map(|tc| SdkToolCall {
+                id: tc.id.clone(),
+                call_type: tc.call_type.clone(),
+                function: SdkFunctionCall { name: tc.function.name.clone(), arguments: tc.function.arguments.clone() },
+            }).collect()),
+            tool_call_id: m.tool_call_id.clone(),
+        }).collect(),
+        max_tokens: wasm.max_tokens,
+        temperature: wasm.temperature,
+        top_p: wasm.top_p,
+        frequency_penalty: wasm.frequency_penalty,
+        presence_penalty: wasm.presence_penalty,
+        stop: wasm.stop.clone(),
+        tools: wasm.tools.as_ref().map(|ts| ts.iter().map(|t| SdkTool {
+            tool_type: "function".to_string(),
+            function: SdkFunctionDef {
+                name: t.function.name.clone(),
+                description: t.function.description.clone(),
+                parameters: t.function.parameters.clone(),
+            },
+        }).collect()),
+        tool_choice: wasm.tool_choice.as_ref().map(|tc| match tc {
+            WasmTC::Auto => SdkToolChoice::Auto,
+            WasmTC::None => SdkToolChoice::None,
+            WasmTC::Required => SdkToolChoice::Required,
+            WasmTC::Specific { function } => SdkToolChoice::Specific {
+                function: SdkToolChoiceFunction { name: function.name.clone() },
+            },
+        }),
+        response_format: wasm.response_format.as_ref().map(|rf| SdkResponseFormat {
+            format_type: rf.format_type.clone(),
+        }),
+    }
 }
 
 fn build_openai_request(sdk: &SdkRequest) -> OpenAiRequest {
@@ -738,6 +818,24 @@ mod tests {
         assert_eq!(sdk_resp.tool_calls[0].function.name, "get_weather");
         assert_eq!(sdk_resp.finish_reason, Some("tool_calls".to_string()));
         assert_eq!(sdk_resp.usage.unwrap().total_tokens, 70);
+    }
+
+    #[test]
+    fn test_bincode_roundtrip_llm_request() {
+        use platform_challenge_sdk_wasm::{LlmMessage, LlmRequest};
+        let req = LlmRequest::simple(
+            "moonshotai/Kimi-K2.5-TEE",
+            vec![
+                LlmMessage::system("test system"),
+                LlmMessage::user("test user"),
+            ],
+            2048,
+        );
+        let bytes = bincode::serialize(&req).unwrap();
+        println!("Serialized {} bytes, first 64: {:?}", bytes.len(), &bytes[..64.min(bytes.len())]);
+        let decoded: LlmRequest = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.model, "moonshotai/Kimi-K2.5-TEE");
+        assert_eq!(decoded.messages.len(), 2);
     }
 
     #[test]
