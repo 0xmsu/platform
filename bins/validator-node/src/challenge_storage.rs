@@ -297,7 +297,9 @@ impl StorageBackend for ChallengeStorageBackend {
             }
         }
 
-        let result: Vec<(Vec<u8>, Vec<u8>)> = items.into_iter().collect();
+        // Sort by key for deterministic ordering across calls
+        let mut result: Vec<(Vec<u8>, Vec<u8>)> = items.into_iter().collect();
+        result.sort_by(|a, b| a.0.cmp(&b.0));
         let limited = if result.len() > limit as usize {
             result[..limit as usize].to_vec()
         } else {

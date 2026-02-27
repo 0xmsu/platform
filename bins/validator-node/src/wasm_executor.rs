@@ -1195,7 +1195,7 @@ impl WasmChallengeExecutor {
                 ..self.config.storage_host_config.clone()
             },
             storage_backend: Arc::clone(&self.config.storage_backend),
-            consensus_policy: ConsensusPolicy::read_only(),
+            consensus_policy: ConsensusPolicy::default(),
             network_policy: NetworkPolicy::development(),
             time_policy: TimePolicy::deterministic(real_now_ms),
             block_height,

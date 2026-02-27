@@ -478,6 +478,10 @@ impl ChainState {
             pending_ids: Vec<String>,
             weight_voter_count: usize,
             historical_weight_epochs: Vec<u64>,
+            completed_eval_count: usize,
+            leaderboard_challenges: Vec<String>,
+            active_job_ids: Vec<String>,
+            task_progress_ids: Vec<String>,
         }
 
         let mut validators: Vec<(String, u64)> = self
@@ -503,6 +507,19 @@ impl ChainState {
             self.historical_weights.keys().copied().collect();
         historical_weight_epochs.sort();
 
+        let completed_eval_count: usize =
+            self.completed_evaluations.values().map(|v| v.len()).sum();
+
+        let mut leaderboard_challenges: Vec<String> =
+            self.leaderboard.keys().map(|c| c.to_string()).collect();
+        leaderboard_challenges.sort();
+
+        let mut active_job_ids: Vec<String> = self.active_jobs.keys().cloned().collect();
+        active_job_ids.sort();
+
+        let mut task_progress_ids: Vec<String> = self.task_progress.keys().cloned().collect();
+        task_progress_ids.sort();
+
         let input = HashInput {
             sequence: self.sequence,
             epoch: self.epoch,
@@ -514,6 +531,10 @@ impl ChainState {
             pending_ids,
             weight_voter_count,
             historical_weight_epochs,
+            completed_eval_count,
+            leaderboard_challenges,
+            active_job_ids,
+            task_progress_ids,
         };
 
         self.state_hash = hash_data(&input).unwrap_or([0u8; 32]);
@@ -911,7 +932,7 @@ impl ChainState {
 
         if let Some(record) = self.pending_evaluations.get_mut(submission_id) {
             record.evaluations.insert(validator, evaluation);
-            self.update_hash();
+            self.increment_sequence();
             Ok(())
         } else {
             Err(StateError::ChallengeNotFound(submission_id.to_string()))
@@ -1360,7 +1381,7 @@ impl ChainState {
     pub fn update_task_progress(&mut self, record: TaskProgressRecord) {
         let key = format!("{}:{}", record.submission_id, record.validator.to_hex());
         self.task_progress.insert(key, record);
-        self.update_hash();
+        self.increment_sequence();
     }
 
     pub fn update_challenge_storage_root(&mut self, challenge_id: ChallengeId, root: [u8; 32]) {
@@ -1473,7 +1494,7 @@ impl ChainState {
                             timestamp: chrono::Utc::now().timestamp_millis(),
                         },
                     );
-                    self.update_hash();
+                    self.increment_sequence();
                     return true;
                 }
             }
@@ -1522,7 +1543,7 @@ impl ChainState {
             .entry(submission_id.to_string())
             .or_default()
             .insert(validator, logs_data);
-        self.update_hash();
+        self.increment_sequence();
         true
     }
 

@@ -72,6 +72,19 @@ fn sanitize_for_log(s: &str) -> String {
         .collect()
 }
 
+/// Verify an sr25519 signature from a Hotkey over the given data.
+fn verify_signature(signer: &Hotkey, data: &[u8], signature: &[u8]) -> bool {
+    use sp_core::crypto::Pair as _;
+    if signature.len() != 64 {
+        return false;
+    }
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes.copy_from_slice(signature);
+    let sig = sp_core::sr25519::Signature::from_raw(sig_bytes);
+    let pubkey = sp_core::sr25519::Public::from_raw(signer.0);
+    sp_core::sr25519::Pair::verify(&sig, data, &pubkey)
+}
+
 /// Helper to mutate ChainState and automatically persist changes.
 /// This ensures we never forget to persist after mutations.
 async fn mutate_and_persist<F, R>(
@@ -1789,36 +1802,46 @@ async fn main() -> Result<()> {
                             if let Some(ref executor) = wasm_executor {
                                 match executor.execute_sync_with_block(&module_path, current_block, current_epoch) {
                                     Ok(sync_result) => {
-                                        info!(
-                                            challenge_id = %challenge_id,
-                                            block = current_block,
-                                            total_users = sync_result.total_users,
-                                            "Challenge sync completed, broadcasting proposal"
-                                        );
+                                        // Skip broadcasting if sync was deduped (zeroed hash
+                                        // from DedupFlags guard). Broadcasting a zeroed hash
+                                        // would poison P2P consensus.
+                                        if sync_result.leaderboard_hash == [0u8; 32] && sync_result.total_users == 0 {
+                                            debug!(
+                                                challenge_id = %challenge_id,
+                                                "Sync deduped (zeroed result), skipping broadcast"
+                                            );
+                                        } else {
+                                            info!(
+                                                challenge_id = %challenge_id,
+                                                block = current_block,
+                                                total_users = sync_result.total_users,
+                                                "Challenge sync completed, broadcasting proposal"
+                                            );
 
-                                        // Broadcast sync proposal
-                                        let timestamp = chrono::Utc::now().timestamp_millis();
-                                        let proposal_data = bincode::serialize(&(
-                                            &challenge_id,
-                                            &sync_result.leaderboard_hash,
-                                            current_block,
-                                            timestamp
-                                        )).unwrap_or_default();
-                                        let signature = keypair.sign_bytes(&proposal_data).unwrap_or_default();
+                                            // Broadcast sync proposal
+                                            let timestamp = chrono::Utc::now().timestamp_millis();
+                                            let proposal_data = bincode::serialize(&(
+                                                &challenge_id,
+                                                &sync_result.leaderboard_hash,
+                                                current_block,
+                                                timestamp
+                                            )).unwrap_or_default();
+                                            let signature = keypair.sign_bytes(&proposal_data).unwrap_or_default();
 
-                                        let proposal_msg = P2PMessage::ChallengeSyncProposal(
-                                            platform_p2p_consensus::ChallengeSyncProposalMessage {
-                                                challenge_id,
-                                                sync_result_hash: sync_result.leaderboard_hash,
-                                                proposer: keypair.hotkey(),
-                                                block_number: current_block,
-                                                timestamp,
-                                                signature,
+                                            let proposal_msg = P2PMessage::ChallengeSyncProposal(
+                                                platform_p2p_consensus::ChallengeSyncProposalMessage {
+                                                    challenge_id,
+                                                    sync_result_hash: sync_result.leaderboard_hash,
+                                                    proposer: keypair.hotkey(),
+                                                    block_number: current_block,
+                                                    timestamp,
+                                                    signature,
+                                                }
+                                            );
+
+                                            if let Err(e) = p2p_broadcast_tx.send(platform_p2p_consensus::P2PCommand::Broadcast(proposal_msg)).await {
+                                                warn!(error = %e, "Failed to broadcast sync proposal");
                                             }
-                                        );
-
-                                        if let Err(e) = p2p_broadcast_tx.send(platform_p2p_consensus::P2PCommand::Broadcast(proposal_msg)).await {
-                                            warn!(error = %e, "Failed to broadcast sync proposal");
                                         }
                                     }
                                     Err(e) => {
@@ -3015,10 +3038,29 @@ async fn handle_network_event(
                 // Verify proposer is a known validator
                 let proposer_valid = validator_set.is_validator(&proposal.proposer);
 
+                // Verify cryptographic signature on proposal
+                let sig_valid = if proposer_valid {
+                    let sign_data = bincode::serialize(&(
+                        &proposal.proposal_id,
+                        proposal.challenge_id.to_string(),
+                        proposal.timestamp,
+                    ))
+                    .unwrap_or_default();
+                    verify_signature(&proposal.proposer, &sign_data, &proposal.signature)
+                } else {
+                    false
+                };
+
                 if !proposer_valid {
                     warn!(
                         proposer = %proposal.proposer.to_ss58(),
                         "Storage proposal from unknown validator, ignoring"
+                    );
+                } else if !sig_valid {
+                    warn!(
+                        proposal_id = %hex::encode(&proposal.proposal_id[..8]),
+                        proposer = %proposal.proposer.to_ss58(),
+                        "Storage proposal signature verification failed, ignoring"
                     );
                 } else {
                     // Add proposal to state
@@ -3151,8 +3193,25 @@ async fn handle_network_event(
                 );
 
                 // Verify voter is a known validator
-                if !validator_set.is_validator(&vote.voter) {
+                // Verify cryptographic signature on vote
+                let voter_known = validator_set.is_validator(&vote.voter);
+                let vote_sig_valid = if voter_known {
+                    let vote_sign_data =
+                        bincode::serialize(&(&vote.proposal_id, vote.approve, vote.timestamp))
+                            .unwrap_or_default();
+                    verify_signature(&vote.voter, &vote_sign_data, &vote.signature)
+                } else {
+                    false
+                };
+
+                if !voter_known {
                     warn!(voter = %vote.voter.to_ss58(), "Vote from unknown validator");
+                } else if !vote_sig_valid {
+                    warn!(
+                        proposal_id = %hex::encode(&vote.proposal_id[..8]),
+                        voter = %vote.voter.to_ss58(),
+                        "Storage vote signature verification failed, ignoring"
+                    );
                 } else {
                     // Add vote to proposal
                     let consensus_result = state_manager.apply(|state| {
