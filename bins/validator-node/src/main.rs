@@ -1030,6 +1030,7 @@ async fn main() -> Result<()> {
 
     // Clone p2p_cmd_tx for use in the loop
     let p2p_broadcast_tx = p2p_cmd_tx.clone();
+    let mut weights_cached_at_startup = false;
 
     loop {
         tokio::select! {
@@ -1113,6 +1114,19 @@ async fn main() -> Result<()> {
                     &storage,
                     &mut last_weight_submission_epoch,
                 ).await;
+
+                // On first block after startup, compute weights immediately so
+                // subnet_getWeights RPC returns data for non-bootstrap validators.
+                if !weights_cached_at_startup && new_block_number.is_some() {
+                    weights_cached_at_startup = true;
+                    info!("Startup: computing initial weights for RPC cache");
+                    compute_weights_for_rpc(
+                        &wasm_executor,
+                        &subtensor_client,
+                        &state_manager,
+                        &chain_state,
+                    );
+                }
 
                 // After processing the block, trigger weight submission at the defined interval.
                 // All validators see the same block numbers so they all submit at the same time.
@@ -4155,6 +4169,159 @@ async fn handle_network_event(
     }
 }
 
+/// Compute mechanism weights from WASM challenges and cache them in chain_state
+/// so they are available via the `subnet_getWeights` RPC immediately.
+/// This is called at startup (first block) and at each epoch transition so that
+/// non-bootstrap validators can always fetch the bootstrap validator's weights.
+fn compute_weights_for_rpc(
+    wasm_executor: &Option<Arc<WasmChallengeExecutor>>,
+    client: &Option<SubtensorClient>,
+    state_manager: &Arc<StateManager>,
+    chain_state: &Arc<RwLock<platform_core::ChainState>>,
+) {
+    let executor = match wasm_executor.as_ref() {
+        Some(e) => e,
+        None => return,
+    };
+
+    let challenges: Vec<(String, u8, f64)> = {
+        let cs = chain_state.read();
+        cs.wasm_challenge_configs
+            .iter()
+            .filter(|(_, cfg)| cfg.is_active)
+            .map(|(id, cfg)| {
+                (
+                    id.to_string(),
+                    cfg.config.mechanism_id,
+                    cfg.config.emission_weight,
+                )
+            })
+            .collect()
+    };
+
+    let block_height = state_manager.apply(|state| state.bittensor_block);
+    let epoch = {
+        let cs = chain_state.read();
+        cs.epoch
+    };
+
+    let mut mechanism_weights: Vec<(u8, Vec<u16>, Vec<u16>)> = Vec::new();
+
+    for (cid, mechanism_id, emission_weight) in &challenges {
+        let emission_weight = emission_weight.clamp(0.0, 1.0);
+        if emission_weight < 0.001 {
+            continue;
+        }
+        match executor.execute_get_weights_with_block(&cid, block_height, epoch) {
+            Ok(assignments) if !assignments.is_empty() => {
+                let total_weight: f64 = assignments.iter().map(|a| a.weight).sum();
+                let mut uid_weight_map: std::collections::BTreeMap<u16, f64> =
+                    std::collections::BTreeMap::new();
+                let mut assigned_weight: f64 = 0.0;
+
+                if total_weight > 0.0 {
+                    for assignment in &assignments {
+                        let uid = client
+                            .as_ref()
+                            .and_then(|c| c.get_uid_for_hotkey(&assignment.hotkey));
+                        if let Some(uid) = uid {
+                            let normalized = assignment.weight / total_weight;
+                            let scaled = normalized * emission_weight;
+                            *uid_weight_map.entry(uid).or_insert(0.0) += scaled;
+                            assigned_weight += scaled;
+                        }
+                    }
+                }
+
+                let mut uids: Vec<u16> = Vec::new();
+                let mut vals: Vec<u16> = Vec::new();
+                for (uid, w) in &uid_weight_map {
+                    let weight_u16 = (w * 65535.0).round() as u16;
+                    if weight_u16 > 0 {
+                        uids.push(*uid);
+                        vals.push(weight_u16);
+                    }
+                }
+
+                let burn_weight = 1.0 - assigned_weight;
+                if burn_weight > 0.001 {
+                    let burn_u16 = (burn_weight * 65535.0).round() as u16;
+                    if let Some(pos) = uids.iter().position(|&u| u == 0) {
+                        vals[pos] = vals[pos].saturating_add(burn_u16);
+                    } else {
+                        uids.push(0);
+                        vals.push(burn_u16);
+                    }
+                }
+
+                if !uids.is_empty() {
+                    let max_val = *vals.iter().max().unwrap() as f64;
+                    if max_val > 0.0 && max_val < 65535.0 {
+                        vals = vals
+                            .iter()
+                            .map(|v| ((*v as f64 / max_val) * 65535.0).round() as u16)
+                            .collect();
+                    }
+                    mechanism_weights.push((*mechanism_id, uids, vals));
+                } else {
+                    mechanism_weights.push((*mechanism_id, vec![0u16], vec![65535u16]));
+                }
+            }
+            Ok(_) => {
+                mechanism_weights.push((*mechanism_id, vec![0u16], vec![65535u16]));
+            }
+            Err(_) => {
+                mechanism_weights.push((*mechanism_id, vec![0u16], vec![65535u16]));
+            }
+        }
+    }
+
+    // Dedup by mechanism_id (prefer most UIDs)
+    let weights_to_cache: Vec<(u8, Vec<u16>, Vec<u16>)> = if mechanism_weights.is_empty() {
+        let mechanism_id = {
+            let cs = chain_state.read();
+            cs.mechanism_configs.keys().next().copied().unwrap_or(0u8)
+        };
+        vec![(mechanism_id, vec![0u16], vec![65535u16])]
+    } else {
+        use std::collections::BTreeMap;
+        let mut best: BTreeMap<u8, (Vec<u16>, Vec<u16>)> = BTreeMap::new();
+        for (mid, uids, vals) in &mechanism_weights {
+            let is_burn = uids.len() == 1 && uids[0] == 0;
+            let replace = match best.get(mid) {
+                None => true,
+                Some((ex, _)) => {
+                    let ex_burn = ex.len() == 1 && ex[0] == 0;
+                    if is_burn && !ex_burn {
+                        false
+                    } else if !is_burn && ex_burn {
+                        true
+                    } else {
+                        uids.len() > ex.len()
+                    }
+                }
+            };
+            if replace {
+                best.insert(*mid, (uids.clone(), vals.clone()));
+            }
+        }
+        best.into_iter()
+            .map(|(mid, (uids, vals))| (mid, uids, vals))
+            .collect()
+    };
+
+    info!(
+        "Computed weights for RPC cache: {} mechanisms, {} total entries",
+        weights_to_cache.len(),
+        weights_to_cache.iter().map(|(_, u, _)| u.len()).sum::<usize>()
+    );
+
+    {
+        let mut cs = chain_state.write();
+        cs.last_computed_weights = weights_to_cache;
+    }
+}
+
 async fn handle_block_event(
     event: BlockSyncEvent,
     subtensor: &Option<Arc<Subtensor>>,
@@ -4332,6 +4499,10 @@ async fn handle_block_event(
             state_manager.apply(|state| {
                 state.next_epoch();
             });
+
+            // Recompute weights for RPC cache after epoch transition so
+            // non-bootstrap validators always get fresh data.
+            compute_weights_for_rpc(wasm_executor, client, state_manager, chain_state);
         }
         BlockSyncEvent::CommitWindowOpen { epoch, block } => {
             info!(

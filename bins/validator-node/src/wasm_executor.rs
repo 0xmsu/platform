@@ -1198,6 +1198,10 @@ impl WasmChallengeExecutor {
             consensus_policy: ConsensusPolicy::default(),
             network_policy: NetworkPolicy::development(),
             time_policy: TimePolicy::deterministic(real_now_ms),
+            llm_policy: match &self.config.chutes_api_key {
+                Some(key) => LlmPolicy::with_api_key(key.clone()),
+                None => LlmPolicy::default(),
+            },
             block_height,
             epoch,
             ..Default::default()

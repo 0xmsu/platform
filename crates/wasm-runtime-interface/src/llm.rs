@@ -282,8 +282,8 @@ fn handle_chat_completion(
         }
     };
 
-    // Parse OpenAI response and convert to SDK response (bincode)
-    let sdk_response = match parse_openai_response(&response_body) {
+    // Parse OpenAI response and convert to SDK LlmResponse (bincode)
+    let sdk_response = match parse_openai_to_sdk_response(&response_body) {
         Ok(r) => r,
         Err(err) => {
             warn!(error = %err, "llm proxy: failed to parse response");
@@ -627,6 +627,56 @@ struct SdkUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
     total_tokens: u32,
+}
+
+fn parse_openai_to_sdk_response(body: &[u8]) -> Result<platform_challenge_sdk_wasm::LlmResponse, String> {
+    use platform_challenge_sdk_wasm::{LlmResponse, LlmUsage, llm_types::{ToolCall, FunctionCall}};
+
+    let resp: OpenAiResponse =
+        serde_json::from_slice(body).map_err(|e| format!("JSON parse error: {e}"))?;
+
+    let choice = resp.choices.and_then(|mut c| {
+        if c.is_empty() { None } else { Some(c.remove(0)) }
+    });
+
+    let (content, tool_calls_raw, finish_reason) = match choice {
+        Some(c) => {
+            let fr = c.finish_reason;
+            match c.message {
+                Some(msg) => (msg.content, msg.tool_calls.unwrap_or_default(), fr),
+                None => (None, Vec::new(), fr),
+            }
+        }
+        None => (None, Vec::new(), None),
+    };
+
+    let tool_calls: Vec<ToolCall> = tool_calls_raw
+        .into_iter()
+        .filter_map(|tc| {
+            let func = tc.function?;
+            Some(ToolCall {
+                id: tc.id.unwrap_or_default(),
+                call_type: tc.call_type.unwrap_or_else(|| "function".to_string()),
+                function: FunctionCall {
+                    name: func.name.unwrap_or_default(),
+                    arguments: func.arguments.unwrap_or_default(),
+                },
+            })
+        })
+        .collect();
+
+    let usage = resp.usage.map(|u| LlmUsage {
+        prompt_tokens: u.prompt_tokens.unwrap_or(0),
+        completion_tokens: u.completion_tokens.unwrap_or(0),
+        total_tokens: u.total_tokens.unwrap_or(0),
+    });
+
+    Ok(LlmResponse {
+        content,
+        tool_calls,
+        usage,
+        finish_reason,
+    })
 }
 
 fn parse_openai_response(body: &[u8]) -> Result<SdkResponse, String> {
