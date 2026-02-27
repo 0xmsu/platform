@@ -61,6 +61,11 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
+/// Handler for computing weights in real-time (called by subnet_getWeights)
+pub type GetWeightsHandler = Arc<
+    dyn Fn() -> Vec<(u8, Vec<u16>, Vec<u16>)> + Send + Sync,
+>;
+
 /// Handler for challenge routes
 pub type ChallengeRouteHandler = Arc<
     dyn Fn(
@@ -187,6 +192,8 @@ pub struct RpcHandler {
     pub broadcast_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>,
     /// Keypair for signing P2P messages (optional, set by validator)
     pub keypair: Arc<RwLock<Option<platform_core::Keypair>>>,
+    /// Real-time weight computation handler
+    pub get_weights_handler: Arc<RwLock<Option<GetWeightsHandler>>>,
 }
 
 impl RpcHandler {
@@ -201,6 +208,7 @@ impl RpcHandler {
             route_handler: Arc::new(RwLock::new(None)),
             broadcast_tx: Arc::new(RwLock::new(None)),
             keypair: Arc::new(RwLock::new(None)),
+            get_weights_handler: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -229,6 +237,10 @@ impl RpcHandler {
     /// Set the route handler callback
     pub fn set_route_handler(&self, handler: ChallengeRouteHandler) {
         *self.route_handler.write() = Some(handler);
+    }
+
+    pub fn set_get_weights_handler(&self, handler: GetWeightsHandler) {
+        *self.get_weights_handler.write() = Some(handler);
     }
 
     /// Get all registered challenge routes from ChainState
@@ -1467,18 +1479,17 @@ impl RpcHandler {
     // ==================== Subnet Namespace ====================
 
     fn subnet_get_weights(&self, id: Value) -> JsonRpcResponse {
-        let chain = self.chain_state.read();
-        let weights = &chain.last_computed_weights;
-
-        if weights.is_empty() {
-            return JsonRpcResponse::result(
-                id,
-                json!({
-                    "weights": [],
-                    "message": "No weights computed yet. Weights are calculated at each commit window."
-                }),
-            );
-        }
+        // Compute weights in real-time if handler is available
+        let weights: Vec<(u8, Vec<u16>, Vec<u16>)> = {
+            let handler = self.get_weights_handler.read();
+            if let Some(ref handler) = *handler {
+                handler()
+            } else {
+                // Fallback to cached weights
+                let chain = self.chain_state.read();
+                chain.last_computed_weights.clone()
+            }
+        };
 
         let entries: Vec<Value> = weights
             .iter()

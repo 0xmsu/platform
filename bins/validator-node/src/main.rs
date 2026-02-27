@@ -508,6 +508,11 @@ async fn main() -> Result<()> {
         state_manager.clone(),
     )));
 
+    // Shared UID map (hotkey_ss58 -> uid) updated on every metagraph sync.
+    // Used by the subnet_getWeights RPC handler to resolve hotkeys in real-time.
+    let shared_uid_map: Arc<RwLock<std::collections::HashMap<String, u16>>> =
+        Arc::new(RwLock::new(std::collections::HashMap::new()));
+
     // Connect to Bittensor
     let subtensor: Option<Arc<Subtensor>>;
     let subtensor_signer: Option<Arc<BittensorSigner>>;
@@ -551,6 +556,14 @@ async fn main() -> Result<()> {
                                 "Validator set: {} active validators",
                                 validator_set.active_count()
                             );
+                            // Update shared UID map for real-time weight RPC
+                            {
+                                let mut uid_map = shared_uid_map.write();
+                                uid_map.clear();
+                                for (uid, neuron) in &mg.neurons {
+                                    uid_map.insert(neuron.hotkey.to_string(), *uid as u16);
+                                }
+                            }
                             client.set_metagraph(mg);
                         }
                         Err(e) => warn!("Metagraph sync failed: {}", e),
@@ -616,6 +629,14 @@ async fn main() -> Result<()> {
                                 validator_set.active_count()
                             );
 
+                            // Update shared UID map for real-time weight RPC
+                            {
+                                let mut uid_map = shared_uid_map.write();
+                                uid_map.clear();
+                                for (uid, neuron) in &mg.neurons {
+                                    uid_map.insert(neuron.hotkey.to_string(), *uid as u16);
+                                }
+                            }
                             client.set_metagraph(mg);
                         }
                         Err(e) => warn!("Metagraph sync failed: {}", e),
@@ -839,6 +860,19 @@ async fn main() -> Result<()> {
                 },
             );
             rpc_server.rpc_handler().set_route_handler(handler);
+        }
+
+        // Wire real-time weight computation for subnet_getWeights RPC
+        {
+            let uid_map = Arc::clone(&shared_uid_map);
+            let cs = Arc::clone(&chain_state);
+            let executor = wasm_executor.clone();
+            let sm = Arc::clone(&state_manager);
+
+            let handler: platform_rpc::GetWeightsHandler = Arc::new(move || {
+                compute_weights_for_rpc_with_uid_map(&executor, &uid_map, &sm, &cs)
+            });
+            rpc_server.rpc_handler().set_get_weights_handler(handler);
         }
 
         rpc_handler_opt = Some(rpc_server.rpc_handler());
@@ -1079,6 +1113,14 @@ async fn main() -> Result<()> {
                                 info!("Pre-weight metagraph refresh: {} neurons", mg.n);
                                 let our_hk = keypair.hotkey();
                                 update_validator_set_from_metagraph(&mg, &validator_set, &chain_state, &valid_voters, &state_root_consensus, &state_manager, Some(&our_hk));
+                                // Update shared UID map for real-time weight RPC
+                                {
+                                    let mut uid_map = shared_uid_map.write();
+                                    uid_map.clear();
+                                    for (uid, neuron) in &mg.neurons {
+                                        uid_map.insert(neuron.hotkey.to_string(), *uid as u16);
+                                    }
+                                }
                                 if let Some(sc) = subtensor_client.as_mut() {
                                     sc.set_metagraph(mg);
                                 }
@@ -4169,8 +4211,145 @@ async fn handle_network_event(
     }
 }
 
-/// Compute mechanism weights from WASM challenges and cache them in chain_state
-/// so they are available via the `subnet_getWeights` RPC immediately.
+/// Compute mechanism weights in real-time using a shared UID map.
+/// Called by the subnet_getWeights RPC handler on every request.
+fn compute_weights_for_rpc_with_uid_map(
+    wasm_executor: &Option<Arc<WasmChallengeExecutor>>,
+    uid_map: &Arc<RwLock<std::collections::HashMap<String, u16>>>,
+    state_manager: &Arc<StateManager>,
+    chain_state: &Arc<RwLock<platform_core::ChainState>>,
+) -> Vec<(u8, Vec<u16>, Vec<u16>)> {
+    let executor = match wasm_executor.as_ref() {
+        Some(e) => e,
+        None => return Vec::new(),
+    };
+
+    let challenges: Vec<(String, u8, f64)> = {
+        let cs = chain_state.read();
+        cs.wasm_challenge_configs
+            .iter()
+            .filter(|(_, cfg)| cfg.is_active)
+            .map(|(id, cfg)| {
+                (
+                    id.to_string(),
+                    cfg.config.mechanism_id,
+                    cfg.config.emission_weight,
+                )
+            })
+            .collect()
+    };
+
+    let block_height = state_manager.apply(|state| state.bittensor_block);
+    let epoch = {
+        let cs = chain_state.read();
+        cs.epoch
+    };
+
+    let map = uid_map.read();
+    let mut mechanism_weights: Vec<(u8, Vec<u16>, Vec<u16>)> = Vec::new();
+
+    for (cid, mechanism_id, emission_weight) in &challenges {
+        let emission_weight = emission_weight.clamp(0.0, 1.0);
+        if emission_weight < 0.001 {
+            continue;
+        }
+        match executor.execute_get_weights_with_block(cid, block_height, epoch) {
+            Ok(assignments) if !assignments.is_empty() => {
+                let total_weight: f64 = assignments.iter().map(|a| a.weight).sum();
+                let mut uid_weight_map: std::collections::BTreeMap<u16, f64> =
+                    std::collections::BTreeMap::new();
+                let mut assigned_weight: f64 = 0.0;
+
+                if total_weight > 0.0 {
+                    for assignment in &assignments {
+                        if let Some(uid) = map.get(&assignment.hotkey) {
+                            let normalized = assignment.weight / total_weight;
+                            let scaled = normalized * emission_weight;
+                            *uid_weight_map.entry(*uid).or_insert(0.0) += scaled;
+                            assigned_weight += scaled;
+                        }
+                    }
+                }
+
+                let mut uids: Vec<u16> = Vec::new();
+                let mut vals: Vec<u16> = Vec::new();
+                for (uid, w) in &uid_weight_map {
+                    let weight_u16 = (w * 65535.0).round() as u16;
+                    if weight_u16 > 0 {
+                        uids.push(*uid);
+                        vals.push(weight_u16);
+                    }
+                }
+
+                let burn_weight = 1.0 - assigned_weight;
+                if burn_weight > 0.001 {
+                    let burn_u16 = (burn_weight * 65535.0).round() as u16;
+                    if let Some(pos) = uids.iter().position(|&u| u == 0) {
+                        vals[pos] = vals[pos].saturating_add(burn_u16);
+                    } else {
+                        uids.push(0);
+                        vals.push(burn_u16);
+                    }
+                }
+
+                if !uids.is_empty() {
+                    let max_val = *vals.iter().max().unwrap() as f64;
+                    if max_val > 0.0 && max_val < 65535.0 {
+                        vals = vals
+                            .iter()
+                            .map(|v| ((*v as f64 / max_val) * 65535.0).round() as u16)
+                            .collect();
+                    }
+                    mechanism_weights.push((*mechanism_id, uids, vals));
+                } else {
+                    mechanism_weights.push((*mechanism_id, vec![0u16], vec![65535u16]));
+                }
+            }
+            Ok(_) => {
+                mechanism_weights.push((*mechanism_id, vec![0u16], vec![65535u16]));
+            }
+            Err(_) => {
+                mechanism_weights.push((*mechanism_id, vec![0u16], vec![65535u16]));
+            }
+        }
+    }
+
+    // Dedup by mechanism_id (prefer most UIDs)
+    if mechanism_weights.is_empty() {
+        let mechanism_id = {
+            let cs = chain_state.read();
+            cs.mechanism_configs.keys().next().copied().unwrap_or(0u8)
+        };
+        return vec![(mechanism_id, vec![0u16], vec![65535u16])];
+    }
+
+    let mut best: std::collections::BTreeMap<u8, (Vec<u16>, Vec<u16>)> =
+        std::collections::BTreeMap::new();
+    for (mid, uids, vals) in &mechanism_weights {
+        let is_burn = uids.len() == 1 && uids[0] == 0;
+        let replace = match best.get(mid) {
+            None => true,
+            Some((ex, _)) => {
+                let ex_burn = ex.len() == 1 && ex[0] == 0;
+                if is_burn && !ex_burn {
+                    false
+                } else if !is_burn && ex_burn {
+                    true
+                } else {
+                    uids.len() > ex.len()
+                }
+            }
+        };
+        if replace {
+            best.insert(*mid, (uids.clone(), vals.clone()));
+        }
+    }
+    best.into_iter()
+        .map(|(mid, (uids, vals))| (mid, uids, vals))
+        .collect()
+}
+
+/// Compute mechanism weights from WASM challenges and cache them in chain_state.
 /// This is called at startup (first block) and at each epoch transition so that
 /// non-bootstrap validators can always fetch the bootstrap validator's weights.
 fn compute_weights_for_rpc(
