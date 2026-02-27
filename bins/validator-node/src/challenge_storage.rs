@@ -257,7 +257,7 @@ impl StorageBackend for ChallengeStorageBackend {
 
         // Convert StorageKey back to the raw key bytes the WASM expects.
         // The key stored in DStorageKey is hex-encoded, so decode it back.
-        let items: Vec<(Vec<u8>, Vec<u8>)> = result
+        let mut items: HashMap<Vec<u8>, Vec<u8>> = result
             .items
             .into_iter()
             .map(|(storage_key, stored_value)| {
@@ -267,7 +267,44 @@ impl StorageBackend for ChallengeStorageBackend {
             })
             .collect();
 
-        Ok(items)
+        // Overlay pending_writes cache so reads within the same sync cycle
+        // see newly written data (fixes stale leaderboard issue).
+        {
+            let cache = self.pending_writes.read();
+            for ((cid, hex_key), pending_value) in cache.iter() {
+                if cid != challenge_id {
+                    continue;
+                }
+                // Check if this key matches the requested prefix
+                let matches = if prefix.is_empty() {
+                    true
+                } else {
+                    hex_key.starts_with(&hex_prefix)
+                };
+                if !matches {
+                    continue;
+                }
+                let raw_key = hex::decode(hex_key).unwrap_or_else(|_| hex_key.as_bytes().to_vec());
+                match pending_value {
+                    Some(data) if !data.is_empty() => {
+                        items.insert(raw_key, data.clone());
+                    }
+                    _ => {
+                        // None or empty = delete
+                        items.remove(&raw_key);
+                    }
+                }
+            }
+        }
+
+        let result: Vec<(Vec<u8>, Vec<u8>)> = items.into_iter().collect();
+        let limited = if result.len() > limit as usize {
+            result[..limit as usize].to_vec()
+        } else {
+            result
+        };
+
+        Ok(limited)
     }
 
     fn count_prefix(&self, challenge_id: &str, prefix: &[u8]) -> Result<u64, StorageHostError> {

@@ -527,6 +527,7 @@ async fn main() -> Result<()> {
                     match sync_metagraph(&bittensor_client, args.netuid).await {
                         Ok(mg) => {
                             info!("Metagraph synced: {} neurons", mg.n);
+                            let our_hk = keypair.hotkey();
                             update_validator_set_from_metagraph(
                                 &mg,
                                 &validator_set,
@@ -534,6 +535,7 @@ async fn main() -> Result<()> {
                                 &valid_voters,
                                 &state_root_consensus,
                                 &state_manager,
+                                Some(&our_hk),
                             );
                             info!(
                                 "Validator set: {} active validators",
@@ -589,6 +591,7 @@ async fn main() -> Result<()> {
                             info!("Metagraph synced: {} neurons", mg.n);
 
                             // Update validator set from metagraph
+                            let our_hk = keypair.hotkey();
                             update_validator_set_from_metagraph(
                                 &mg,
                                 &validator_set,
@@ -596,6 +599,7 @@ async fn main() -> Result<()> {
                                 &valid_voters,
                                 &state_root_consensus,
                                 &state_manager,
+                                Some(&our_hk),
                             );
                             info!(
                                 "Validator set: {} active validators",
@@ -1062,7 +1066,8 @@ async fn main() -> Result<()> {
                         ).await {
                             Ok(Ok(mg)) => {
                                 info!("Pre-weight metagraph refresh: {} neurons", mg.n);
-                                update_validator_set_from_metagraph(&mg, &validator_set, &chain_state, &valid_voters, &state_root_consensus, &state_manager);
+                                let our_hk = keypair.hotkey();
+                                update_validator_set_from_metagraph(&mg, &validator_set, &chain_state, &valid_voters, &state_root_consensus, &state_manager, Some(&our_hk));
                                 if let Some(sc) = subtensor_client.as_mut() {
                                     sc.set_metagraph(mg);
                                 }
@@ -1595,7 +1600,8 @@ async fn main() -> Result<()> {
                     match sync_metagraph(client, netuid).await {
                         Ok(mg) => {
                             info!("Metagraph refreshed: {} neurons", mg.n);
-                            update_validator_set_from_metagraph(&mg, &validator_set, &chain_state, &valid_voters, &state_root_consensus, &state_manager);
+                            let our_hk = keypair.hotkey();
+                            update_validator_set_from_metagraph(&mg, &validator_set, &chain_state, &valid_voters, &state_root_consensus, &state_manager, Some(&our_hk));
                             if let Some(sc) = subtensor_client.as_mut() {
                                 sc.set_metagraph(mg);
                             }
@@ -2030,6 +2036,7 @@ fn update_validator_set_from_metagraph(
         parking_lot::Mutex<platform_distributed_storage::state_consensus::StateRootConsensus>,
     >,
     state_manager: &Arc<StateManager>,
+    our_hotkey: Option<&Hotkey>,
 ) {
     let mut cs = chain_state.write();
     cs.registered_hotkeys.clear();
@@ -2075,6 +2082,21 @@ fn update_validator_set_from_metagraph(
             state.update_validator(hotkey, stake);
         }
     });
+
+    // Ensure our own validator is always registered in the P2P state so it can
+    // vote on its own storage proposals. Without this, a validator below the
+    // 10k TAO threshold would have total_stake=0 and all proposals would fail.
+    if let Some(our_hk) = our_hotkey {
+        state_manager.apply(|state| {
+            if !state.validators.contains_key(our_hk) {
+                info!(
+                    hotkey = %our_hk.to_ss58(),
+                    "Self-registering validator with minimum stake for storage consensus"
+                );
+                state.update_validator(our_hk.clone(), 1);
+            }
+        });
+    }
 }
 
 async fn handle_network_event(
