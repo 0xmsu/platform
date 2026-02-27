@@ -1045,29 +1045,45 @@ async fn main() -> Result<()> {
                     None => std::future::pending().await,
                 }
             } => {
-                // Force metagraph refresh before weight submission to avoid stale hotkey->UID mappings
-                if matches!(event, BlockSyncEvent::CommitWindowOpen { .. }) {
+                // Check if this block triggers weight submission (every WEIGHT_SET_BLOCK_INTERVAL blocks)
+                let is_weight_block = if let BlockSyncEvent::NewBlock { block_number, .. } = &event {
+                    *block_number > 0
+                        && *block_number % platform_core::constants::WEIGHT_SET_BLOCK_INTERVAL == 0
+                } else {
+                    false
+                };
+
+                // Force metagraph refresh before weight submission
+                if is_weight_block || matches!(event, BlockSyncEvent::CommitWindowOpen { .. }) {
                     if let Some(bittensor_client) = bittensor_client_for_metagraph.as_ref() {
                         match tokio::time::timeout(
                             Duration::from_secs(15),
                             sync_metagraph(bittensor_client, netuid),
                         ).await {
                             Ok(Ok(mg)) => {
-                                info!("Pre-commit metagraph refresh: {} neurons", mg.n);
+                                info!("Pre-weight metagraph refresh: {} neurons", mg.n);
                                 update_validator_set_from_metagraph(&mg, &validator_set, &chain_state, &valid_voters, &state_root_consensus, &state_manager);
                                 if let Some(sc) = subtensor_client.as_mut() {
                                     sc.set_metagraph(mg);
                                 }
                             }
                             Ok(Err(e)) => {
-                                warn!("Pre-commit metagraph refresh failed: {}. Using cached.", e);
+                                warn!("Pre-weight metagraph refresh failed: {}. Using cached.", e);
                             }
                             Err(_) => {
-                                warn!("Pre-commit metagraph refresh timed out (15s). Using cached.");
+                                warn!("Pre-weight metagraph refresh timed out (15s). Using cached.");
                             }
                         }
                     }
                 }
+
+                // Extract block number before moving event
+                let new_block_number = if let BlockSyncEvent::NewBlock { block_number, .. } = &event {
+                    Some(*block_number)
+                } else {
+                    None
+                };
+
                 handle_block_event(
                     event,
                     &subtensor,
@@ -1082,6 +1098,35 @@ async fn main() -> Result<()> {
                     &storage,
                     &mut last_weight_submission_epoch,
                 ).await;
+
+                // After processing the block, trigger weight submission at the defined interval.
+                // All validators see the same block numbers so they all submit at the same time.
+                if is_weight_block {
+                    let block_number = new_block_number.unwrap();
+                    let tempo = 360u64;
+                    let netuid_plus_one = (netuid as u64).saturating_add(1);
+                    let epoch = block_number.saturating_add(netuid_plus_one) / (tempo + 1);
+                    info!(
+                        "=== WEIGHT SET BLOCK {} (every {} blocks) epoch {} ===",
+                        block_number,
+                        platform_core::constants::WEIGHT_SET_BLOCK_INTERVAL,
+                        epoch,
+                    );
+                    handle_block_event(
+                        BlockSyncEvent::CommitWindowOpen { epoch, block: block_number },
+                        &subtensor,
+                        &subtensor_signer,
+                        &subtensor_client,
+                        &state_manager,
+                        netuid,
+                        version_key,
+                        &wasm_executor,
+                        &keypair,
+                        &chain_state,
+                        &storage,
+                        &mut last_weight_submission_epoch,
+                    ).await;
+                }
             }
 
             // RPC -> P2P commands (challenge updates from sudo)
@@ -1692,67 +1737,12 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Submit weights on-chain 90s after boot (after RPC pre-compute at 70s).
+            // Startup weight submission disabled: all validators set weights at the
+            // same block via WEIGHT_SET_BLOCK_INTERVAL (every N Bittensor blocks).
             _ = &mut startup_weight_delay, if !startup_weights_submitted => {
                 startup_weights_submitted = true;
-                let current_block = state_manager.apply(|state| state.bittensor_block);
-                if current_block == 0 {
-                    warn!("Startup weight submission skipped: blockchain not yet synced");
-                } else if subtensor.is_none() || subtensor_signer.is_none() {
-                    warn!("Startup weight submission skipped: subtensor not connected");
-                } else if wasm_executor.is_none() {
-                    warn!("Startup weight submission skipped: WASM executor not ready");
-                } else {
-                    let has_challenges = {
-                        let cs = chain_state.read();
-                        cs.wasm_challenge_configs.iter().any(|(_, cfg)| cfg.is_active)
-                    };
-                    if !has_challenges {
-                        warn!("Startup weight submission skipped: no active challenges loaded");
-                    } else {
-                        // Refresh metagraph before startup weight submission
-                        if let Some(bittensor_client) = bittensor_client_for_metagraph.as_ref() {
-                            match tokio::time::timeout(
-                                Duration::from_secs(15),
-                                sync_metagraph(bittensor_client, netuid),
-                            ).await {
-                                Ok(Ok(mg)) => {
-                                    info!("Startup metagraph refresh: {} neurons", mg.n);
-                                    update_validator_set_from_metagraph(&mg, &validator_set, &chain_state, &valid_voters, &state_root_consensus, &state_manager);
-                                    if let Some(sc) = subtensor_client.as_mut() {
-                                        sc.set_metagraph(mg);
-                                    }
-                                }
-                                Ok(Err(e)) => warn!("Startup metagraph refresh failed: {}", e),
-                                Err(_) => warn!("Startup metagraph refresh timed out after 15s"),
-                            }
-                        }
-                        let tempo = 360u64;
-                        let netuid_plus_one = (netuid as u64).saturating_add(1);
-                        let epoch = current_block.saturating_add(netuid_plus_one) / (tempo + 1);
-                        // Only submit if we're actually in the commit window phase.
-                        // The commit window is the first block of each epoch.
-                        let epoch_start = epoch.saturating_mul(tempo + 1).saturating_sub(netuid_plus_one);
-                        let blocks_into_epoch = current_block.saturating_sub(epoch_start);
-                        // Commit window is typically ~1 block at the start of each epoch.
-                        // If we're past it, wait for the next real CommitWindowOpen event.
-                        if blocks_into_epoch > 5 {
-                            info!(
-                                "Startup weight submission skipped: block {} is {} blocks into epoch {} (past commit window), will wait for next epoch",
-                                current_block, blocks_into_epoch, epoch
-                            );
-                        } else {
-                            info!("Startup weight submission: epoch {} block {} (90s after boot)", epoch, current_block);
-                            handle_block_event(
-                                BlockSyncEvent::CommitWindowOpen { epoch, block: current_block },
-                                &subtensor, &subtensor_signer, &subtensor_client,
-                                &state_manager, netuid, version_key, &wasm_executor,
-                                &keypair, &chain_state, &storage,
-                                &mut last_weight_submission_epoch,
-                            ).await;
-                        }
-                    }
-                }
+                info!("Startup weight submission disabled: weights are set at block intervals (every {} blocks)",
+                    platform_core::constants::WEIGHT_SET_BLOCK_INTERVAL);
             }
 
             // Periodic checkpoint

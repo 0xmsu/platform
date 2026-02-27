@@ -91,6 +91,11 @@ pub const BOOTSTRAP_VALIDATOR_SS58: &str = "5GziQCcRpN8NCJktX343brnfuVe3w6gUYiee
 /// Weight assigned to UID 0 during the bootstrap period
 pub const BOOTSTRAP_UID0_WEIGHT: u16 = u16::MAX;
 
+/// Block interval at which ALL validators must set weights simultaneously.
+/// Every N Bittensor blocks, when `bittensor_block % WEIGHT_SET_BLOCK_INTERVAL == 0`,
+/// all validators compute and submit weights at the same block.
+pub const WEIGHT_SET_BLOCK_INTERVAL: u64 = 100;
+
 #[cfg(test)]
 mod tests {
     use super::*;
