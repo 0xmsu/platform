@@ -65,6 +65,8 @@ pub struct BlockSync {
     config: BlockSyncConfig,
     listener: Option<BlockListener>,
     client: Option<Arc<BittensorClient>>,
+    /// Stored so we can recreate the client on disconnect.
+    rpc_url: Option<String>,
     running: Arc<RwLock<bool>>,
     event_tx: mpsc::Sender<BlockSyncEvent>,
     event_rx: Option<mpsc::Receiver<BlockSyncEvent>>,
@@ -83,6 +85,7 @@ impl BlockSync {
             config,
             listener: None,
             client: None,
+            rpc_url: None,
             running: Arc::new(RwLock::new(false)),
             event_tx,
             event_rx: Some(event_rx),
@@ -129,6 +132,7 @@ impl BlockSync {
             epoch_info.blocks_remaining, mins, secs
         );
 
+        self.rpc_url = Some(client.rpc_url.clone());
         self.listener = Some(listener);
         self.client = Some(client);
 
@@ -140,7 +144,12 @@ impl BlockSync {
         *self.tempo.read().await
     }
 
-    /// Start the block sync loop
+    /// Start the block sync loop.
+    ///
+    /// The spawned background task monitors the block listener and, if the
+    /// underlying Bittensor RPC connection dies permanently (broadcast channel
+    /// closed), it will **recreate** the `BittensorClient` from scratch,
+    /// re-initialise the `BlockListener`, and resume processing blocks.
     pub async fn start(&self) -> anyhow::Result<()> {
         let listener = self
             .listener
@@ -152,6 +161,11 @@ impl BlockSync {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
 
+        let rpc_url = self
+            .rpc_url
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("RPC URL not set"))?;
+
         // Check if already running
         {
             let mut running = self.running.write().await;
@@ -162,28 +176,32 @@ impl BlockSync {
         }
 
         // Subscribe to block events
-        let mut block_rx = listener.subscribe();
+        let block_rx = listener.subscribe();
         let event_tx = self.event_tx.clone();
         let running = self.running.clone();
         let current_block = self.current_block.clone();
         let current_epoch = self.current_epoch.clone();
         let current_phase = self.current_phase.clone();
+        let config = self.config.clone();
 
         // Start the listener
         listener.start(client.clone()).await?;
 
-        // Process events in background
+        // Process events in background with automatic client recreation
         tokio::spawn(async move {
             let mut was_disconnected = false;
             let mut first_block_seen = false;
+            let mut current_block_rx = block_rx;
+            let mut consecutive_reconnect_failures: u32 = 0;
 
             loop {
                 if !*running.read().await {
                     break;
                 }
 
-                match block_rx.recv().await {
+                match current_block_rx.recv().await {
                     Ok(event) => {
+                        consecutive_reconnect_failures = 0;
                         let should_break = BlockSync::handle_block_event(
                             event,
                             &event_tx,
@@ -203,14 +221,96 @@ impl BlockSync {
                         warn!("Block sync lagged by {} events", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        info!("Block event channel closed");
-                        break;
+                        // The BlockListener's internal task has died and the
+                        // broadcast channel is gone.  The old BittensorClient's
+                        // websocket is likely dead too, so retrying with it
+                        // will not help.  Recreate everything from scratch.
+
+                        if !*running.read().await {
+                            break;
+                        }
+
+                        consecutive_reconnect_failures += 1;
+                        let delay_secs = std::cmp::min(5 * consecutive_reconnect_failures, 60);
+                        warn!(
+                            attempt = consecutive_reconnect_failures,
+                            delay_secs,
+                            "Block listener channel closed — recreating Bittensor client in {}s",
+                            delay_secs,
+                        );
+
+                        let _ = event_tx
+                            .send(BlockSyncEvent::Disconnected(
+                                "Block listener channel closed, recreating client".into(),
+                            ))
+                            .await;
+
+                        tokio::time::sleep(std::time::Duration::from_secs(delay_secs as u64))
+                            .await;
+
+                        match BlockSync::recreate_listener(&rpc_url, &config).await {
+                            Ok((new_client, new_listener, new_rx, epoch_info)) => {
+                                info!(
+                                    block = epoch_info.current_block,
+                                    epoch = epoch_info.epoch_number,
+                                    "Bittensor client recreated successfully"
+                                );
+                                *current_block.write().await = epoch_info.current_block;
+                                *current_epoch.write().await = epoch_info.epoch_number;
+                                *current_phase.write().await = epoch_info.phase;
+                                current_block_rx = new_rx;
+                                was_disconnected = true;
+                                consecutive_reconnect_failures = 0;
+
+                                if let Err(e) = new_listener.start(new_client).await {
+                                    warn!("Failed to start recreated listener: {}", e);
+                                } else {
+                                    let _ =
+                                        event_tx.send(BlockSyncEvent::Reconnected).await;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    attempt = consecutive_reconnect_failures,
+                                    error = %e,
+                                    "Failed to recreate Bittensor client, will retry"
+                                );
+                            }
+                        }
                     }
                 }
             }
         });
 
         Ok(())
+    }
+
+    /// Create a fresh `BittensorClient` + `BlockListener` from the RPC URL.
+    async fn recreate_listener(
+        rpc_url: &str,
+        config: &BlockSyncConfig,
+    ) -> anyhow::Result<(
+        Arc<BittensorClient>,
+        BlockListener,
+        broadcast::Receiver<BlockEvent>,
+        EpochInfo,
+    )> {
+        let client = Arc::new(BittensorClient::new(rpc_url).await?);
+
+        let listener_config = BlockListenerConfig {
+            netuid: config.netuid,
+            channel_capacity: config.channel_capacity,
+            auto_reconnect: true,
+            reconnect_delay_ms: 5000,
+        };
+
+        let listener = BlockListener::new(listener_config);
+        listener.init(&client).await?;
+
+        let epoch_info = listener.current_epoch_info(&client).await?;
+        let rx = listener.subscribe();
+
+        Ok((client, listener, rx, epoch_info))
     }
 
     async fn handle_block_event(

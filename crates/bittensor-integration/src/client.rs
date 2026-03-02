@@ -39,6 +39,61 @@ impl SubtensorClient {
         Ok(())
     }
 
+    /// Reconnect to Subtensor by creating a fresh client.
+    /// Useful when the underlying websocket has died.
+    pub async fn reconnect(&mut self) -> Result<()> {
+        info!(
+            "Reconnecting to Subtensor: {}",
+            self.config.endpoint
+        );
+        self.client = None;
+        let client = BittensorClient::new(&self.config.endpoint).await?;
+        self.client = Some(client);
+        info!("Reconnected to Subtensor");
+        Ok(())
+    }
+
+    /// Execute a fallible operation, reconnecting once if the error looks
+    /// like a dead websocket / RPC transport failure.
+    pub async fn with_reconnect<F, Fut, T>(&mut self, op: F) -> Result<T>
+    where
+        F: Fn(&BittensorClient) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected to Subtensor"))?;
+
+        match op(client).await {
+            Ok(val) => Ok(val),
+            Err(first_err) => {
+                let msg = first_err.to_string().to_lowercase();
+                let is_transport = msg.contains("websocket")
+                    || msg.contains("connection reset")
+                    || msg.contains("connection refused")
+                    || msg.contains("broken pipe")
+                    || msg.contains("eof")
+                    || msg.contains("channel closed")
+                    || msg.contains("timed out")
+                    || msg.contains("timeout");
+
+                if !is_transport {
+                    return Err(first_err);
+                }
+
+                info!("Transport error detected, attempting reconnect: {}", first_err);
+                self.reconnect().await?;
+
+                let client = self
+                    .client
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Not connected after reconnect"))?;
+                op(client).await
+            }
+        }
+    }
+
     /// Set the signer from a seed phrase or key
     pub fn set_signer(&mut self, seed: &str) -> Result<()> {
         let signer = signer_from_seed(seed)?;
