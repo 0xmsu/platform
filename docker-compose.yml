@@ -25,7 +25,6 @@ services:
 
     volumes:
       - validator-data:/data
-      - ./target/release/validator-node:/usr/local/bin/validator-node:ro
 
     environment:
       - RUST_LOG=${RUST_LOG:-info,validator_node=debug}
