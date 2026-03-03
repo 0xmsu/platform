@@ -1115,13 +1115,15 @@ async fn main() -> Result<()> {
             }
 
             // Run sync() on each challenge at startup
+            let startup_block = state_manager.apply(|state| state.bittensor_block);
+            let startup_epoch = if startup_block > 0 { startup_block / 360 } else { 0 };
             for (challenge_id, module_path) in &challenges {
                 let mp = if module_path.is_empty() {
                     challenge_id.to_string()
                 } else {
                     module_path.clone()
                 };
-                match executor.execute_sync_with_block(&mp, 120, 0) {
+                match executor.execute_sync_with_block(&mp, startup_block, startup_epoch) {
                     Ok(result) => {
                         info!(
                             challenge_id = %challenge_id,

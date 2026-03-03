@@ -1507,6 +1507,7 @@ impl WasmChallengeExecutor {
 
     /// Execute background_tick() on the persistent WASM instance.
     /// Called every block for lightweight background work.
+    /// Uses try_lock to avoid blocking sync() which has higher priority.
     pub fn execute_background_tick(
         &self,
         module_path: &str,
@@ -1514,7 +1515,13 @@ impl WasmChallengeExecutor {
         epoch: u64,
     ) -> Result<()> {
         let pi = self.get_or_create_persistent(module_path, block_height, epoch)?;
-        let mut guard = pi.lock();
+        let mut guard = match pi.try_lock() {
+            Some(g) => g,
+            None => {
+                debug!(module = module_path, "background_tick skipped: instance busy (sync in progress)");
+                return Ok(());
+            }
+        };
 
         let real_now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
