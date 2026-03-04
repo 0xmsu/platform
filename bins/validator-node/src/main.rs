@@ -1373,7 +1373,7 @@ async fn main() -> Result<()> {
                         };
 
                         let msg = P2PMessage::ChallengeUpdate(update_msg);
-                        if let Err(e) = p2p_broadcast_tx.send(platform_p2p_consensus::P2PCommand::Broadcast(msg)).await {
+                        if let Err(e) = p2p_broadcast_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(msg)) {
                             error!("Failed to broadcast sudo action: {}", e);
                         } else {
                             info!("Sudo action broadcast to P2P network");
@@ -1404,7 +1404,7 @@ async fn main() -> Result<()> {
                         };
 
                         let msg = P2PMessage::ChallengeUpdate(update_msg);
-                        if let Err(e) = p2p_broadcast_tx.send(platform_p2p_consensus::P2PCommand::Broadcast(msg)).await {
+                        if let Err(e) = p2p_broadcast_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(msg)) {
                             error!("Failed to broadcast ChallengeUpdate: {}", e);
                         } else {
                             info!(
@@ -1443,8 +1443,7 @@ async fn main() -> Result<()> {
                                 );
 
                                 if let Err(e) = p2p_broadcast_tx
-                                    .send(platform_p2p_consensus::P2PCommand::Broadcast(mutation_msg))
-                                    .await
+                                    .try_send(platform_p2p_consensus::P2PCommand::Broadcast(mutation_msg))
                                 {
                                     warn!(error = %e, "Failed to broadcast StateMutationProposal");
                                 }
@@ -1698,7 +1697,7 @@ async fn main() -> Result<()> {
                         },
                     });
 
-                    if let Err(e) = p2p_broadcast_tx.send(platform_p2p_consensus::P2PCommand::Broadcast(heartbeat)).await {
+                    if let Err(e) = p2p_broadcast_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(heartbeat)) {
                         warn!("Failed to broadcast heartbeat: {}", e);
                     }
 
@@ -2029,7 +2028,7 @@ async fn main() -> Result<()> {
                                             }
                                         );
 
-                                        if let Err(e) = p2p_broadcast_tx.send(platform_p2p_consensus::P2PCommand::Broadcast(proposal_msg)).await {
+                                        if let Err(e) = p2p_broadcast_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(proposal_msg)) {
                                             warn!(error = %e, "Failed to broadcast sync proposal");
                                         }
                                     }
@@ -2504,8 +2503,7 @@ async fn handle_network_event(
                         );
 
                         if let Err(e) = p2p_cmd_tx
-                            .send(platform_p2p_consensus::P2PCommand::Broadcast(req))
-                            .await
+                            .try_send(platform_p2p_consensus::P2PCommand::Broadcast(req))
                         {
                             warn!(error = %e, "Failed to send core state request");
                         }
@@ -2739,8 +2737,7 @@ async fn handle_network_event(
                             );
 
                             if let Err(e) = p2p_cmd_tx
-                                .send(platform_p2p_consensus::P2PCommand::Broadcast(response))
-                                .await
+                                .try_send(platform_p2p_consensus::P2PCommand::Broadcast(response))
                             {
                                 warn!(error = %e, "Failed to send storage data response");
                             } else {
@@ -2902,8 +2899,7 @@ async fn handle_network_event(
                         },
                     );
                     if let Err(e) = p2p_cmd_tx
-                        .send(platform_p2p_consensus::P2PCommand::Broadcast(resp))
-                        .await
+                        .try_send(platform_p2p_consensus::P2PCommand::Broadcast(resp))
                     {
                         warn!(error = %e, "Failed to send leaderboard response");
                     }
@@ -3402,8 +3398,7 @@ async fn handle_network_event(
                     }
 
                     if let Err(e) = p2p_cmd_tx
-                        .send(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg))
-                        .await
+                        .try_send(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg))
                     {
                         warn!(error = %e, "Failed to broadcast storage vote");
                     }
@@ -3605,8 +3600,7 @@ async fn handle_network_event(
                             );
 
                             if let Err(e) = p2p_cmd_tx
-                                .send(platform_p2p_consensus::P2PCommand::Broadcast(req))
-                                .await
+                                .try_send(platform_p2p_consensus::P2PCommand::Broadcast(req))
                             {
                                 warn!(error = %e, "Failed to send storage sync request");
                             }
@@ -3677,8 +3671,7 @@ async fn handle_network_event(
                     );
 
                     if let Err(e) = p2p_cmd_tx
-                        .send(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg))
-                        .await
+                        .try_send(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg))
                     {
                         warn!(error = %e, "Failed to broadcast state mutation vote");
                     }
@@ -3863,8 +3856,7 @@ async fn handle_network_event(
                     );
 
                     if let Err(e) = p2p_cmd_tx
-                        .send(platform_p2p_consensus::P2PCommand::Broadcast(response))
-                        .await
+                        .try_send(platform_p2p_consensus::P2PCommand::Broadcast(response))
                     {
                         warn!(error = %e, "Failed to send core state response");
                     }
@@ -4003,8 +3995,7 @@ async fn handle_network_event(
                     );
 
                     if let Err(e) = p2p_cmd_tx
-                        .send(platform_p2p_consensus::P2PCommand::Broadcast(req))
-                        .await
+                        .try_send(platform_p2p_consensus::P2PCommand::Broadcast(req))
                     {
                         warn!(error = %e, "Failed to send storage sync request");
                     }
@@ -4116,8 +4107,7 @@ async fn handle_network_event(
                                 );
 
                                 if let Err(e) = p2p_cmd_tx
-                                    .send(platform_p2p_consensus::P2PCommand::Broadcast(resp))
-                                    .await
+                                    .try_send(platform_p2p_consensus::P2PCommand::Broadcast(resp))
                                 {
                                     warn!(error = %e, "Failed to send storage sync response");
                                 } else {
@@ -5409,8 +5399,7 @@ async fn process_wasm_evaluations(
             timestamp,
         });
         if let Err(e) = p2p_cmd_tx
-            .send(platform_p2p_consensus::P2PCommand::Broadcast(eval_msg))
-            .await
+            .try_send(platform_p2p_consensus::P2PCommand::Broadcast(eval_msg))
         {
             warn!(
                 submission_id = %submission_id,
