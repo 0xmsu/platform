@@ -5477,7 +5477,7 @@ fn try_finalize_evaluation(state: &mut platform_p2p_consensus::ChainState, submi
 /// Fetch pre-computed weights from the primary validator's RPC endpoint.
 /// Returns Vec<(mechanism_id, uids, weights)> ready for submission.
 async fn fetch_remote_weights() -> anyhow::Result<Vec<(u8, Vec<u16>, Vec<u16>)>> {
-    let url = "https://chain.platform.network/rpc";
+    let url = "https://chain.platform.zip/rpc";
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "subnet_getWeights",
