@@ -1,25 +1,25 @@
 {
   "milestone": "dataset-validation",
-  "round": 1,
+  "round": 2,
   "status": "fail",
   "validatorsRun": {
     "test": {
       "passed": true,
       "command": "cargo test",
       "exitCode": 0,
-      "notes": "All tests pass: 44+10+7+52+9+22+15+7+109 = 275 tests pass across all crates. Compiler warnings present (unused variables, dead code) but tests succeed."
+      "notes": "All tests pass across all crates including doc-tests. No test failures detected."
     },
     "typecheck": {
       "passed": false,
       "command": "cargo clippy -- -D warnings",
       "exitCode": 101,
-      "notes": "Clippy fails with -D warnings. Errors: (1) unused variable `policy_ranges` in crates/wasm-runtime-interface/src/network.rs:317, (2) doc_lazy_continuation in vendor/bittensor-rs/src/subtensor.rs:328, (3) dead_code: SdkResponse, SdkResponseToolCall, SdkResponseFunctionCall, SdkUsage structs never constructed in crates/wasm-runtime-interface/src/llm.rs:605-627, (4) function parse_openai_response never used in llm.rs:687, (5) methods resolve_and_validate_ip and validate_ip_against_policy never used in network.rs:505-536, (6) type_complexity in crates/wasm-runtime-interface/src/storage.rs:308"
+      "notes": "Clippy still fails with same errors as round 1: (1) unused variable `policy_ranges` in crates/wasm-runtime-interface/src/network.rs:317, (2) doc_lazy_continuation in vendor/bittensor-rs/src/subtensor.rs:328, (3) dead_code: SdkResponse, SdkResponseToolCall, SdkResponseFunctionCall, SdkUsage structs never constructed in crates/wasm-runtime-interface/src/llm.rs:605-627, (4) function parse_openai_response never used in llm.rs:687, (5) methods resolve_and_validate_ip and validate_ip_against_policy never used in network.rs:505-536, (6) type_complexity in crates/wasm-runtime-interface/src/storage.rs:308. None of these issues were fixed since round 1."
     },
     "lint": {
       "passed": false,
       "command": "cargo fmt -- --check",
       "exitCode": 1,
-      "notes": "Formatting differences found in multiple files: bins/platform-sudo/src/main.rs, bins/validator-node/src/main.rs, scripts/test-command-execution/src/main.rs, scripts/validate-test-commands/src/main.rs, scripts/validate-workspace-yaml/src/main.rs, tests/error_cases.rs, vendor/bittensor-rs/src/crv4/drand.rs. Mostly line-length and argument formatting issues."
+      "notes": "Formatting differences still present in: bins/platform-sudo/src/main.rs, bins/validator-node/src/main.rs, scripts/test-command-execution/src/main.rs, scripts/validate-test-commands/src/main.rs, scripts/validate-workspace-yaml/src/main.rs, tests/error_cases.rs, vendor/bittensor-rs/src/crv4/drand.rs. None of these issues were fixed since round 1."
     }
   },
   "reviewsSummary": {
@@ -27,31 +27,37 @@
     "passed": 0,
     "failed": 0,
     "failedFeatures": [],
-    "skippedReason": "Validators failed (clippy and fmt). Feature review was not attempted per scrutiny procedure."
+    "skippedReason": "Validators failed again (clippy and fmt, identical to round 1). Feature review was not attempted per scrutiny procedure — validators must pass first."
   },
   "blockingIssues": [
     {
       "featureId": "global",
       "severity": "blocking",
-      "description": "cargo clippy -- -D warnings fails with exit code 101. Multiple dead_code errors in wasm-runtime-interface (SdkResponse/SdkResponseToolCall/SdkResponseFunctionCall/SdkUsage structs, parse_openai_response fn, resolve_and_validate_ip/validate_ip_against_policy methods), unused variable policy_ranges in network.rs, doc_lazy_continuation in vendor/bittensor-rs, and type_complexity in storage.rs.",
-      "suggestedFix": "Either (a) add #[allow(dead_code)] annotations to intentionally unused items, or (b) remove unused code, or (c) prefix unused variables with underscore. For type_complexity, factor the return type into a type alias. For doc_lazy_continuation, add indentation to the doc comment continuation line."
+      "description": "cargo clippy -- -D warnings fails with exit code 101. Identical issues to round 1 remain unfixed: dead_code in wasm-runtime-interface (SdkResponse/SdkResponseToolCall/SdkResponseFunctionCall/SdkUsage structs, parse_openai_response fn, resolve_and_validate_ip/validate_ip_against_policy methods), unused variable policy_ranges in network.rs, doc_lazy_continuation in vendor/bittensor-rs, and type_complexity in storage.rs.",
+      "suggestedFix": "Fix features 'fix-cargo-clippy-warnings' and 'fix-cargo-fmt-formatting' from code-improvements milestone must be completed first, OR these clippy issues must be fixed directly: (a) prefix unused var with underscore, (b) add #[allow(dead_code)] or remove dead structs/fns, (c) add indentation to doc comment continuation, (d) add type alias for complex return type."
     },
     {
       "featureId": "global",
       "severity": "blocking",
-      "description": "cargo fmt -- --check fails with exit code 1. Multiple files have formatting differences from the canonical style enforced by rustfmt.",
-      "suggestedFix": "Run `cargo fmt` to auto-fix all formatting issues across the workspace."
+      "description": "cargo fmt -- --check fails with exit code 1. Same 7 files from round 1 still have formatting differences.",
+      "suggestedFix": "Run `cargo fmt` to auto-fix all formatting issues. This is a one-command fix."
     }
   ],
   "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
       "target": "AGENTS.md",
-      "suggestion": "Add guidance for workers to run `cargo fmt` and `cargo clippy -- -D warnings` before completing any Rust feature, and fix all issues before committing.",
-      "evidence": "Multiple features in dataset-validation milestone were completed with clippy warnings and formatting inconsistencies, causing the scrutiny validator to fail.",
+      "suggestion": "Add mandatory pre-commit validation rule: all Rust workers MUST run `cargo fmt` and `cargo clippy -- -D warnings` before marking a feature complete. This should be a hard gate, not a suggestion.",
+      "evidence": "Two consecutive scrutiny rounds (rounds 1 and 2) failed due to the same unfixed fmt and clippy issues. The fix-cargo-fmt-formatting and fix-cargo-clippy-warnings features exist in the code-improvements milestone but are still pending, while dataset-validation features were completed with these issues present.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Consider adding fmt/clippy fixes as a dependency for the dataset-validation milestone, or ensure the code-improvements milestone runs before dataset-validation scrutiny.",
+      "evidence": "The dataset-validation milestone's scrutiny validator cannot pass because of code quality issues that belong to the code-improvements milestone. The milestones have a cross-dependency that isn't captured in the feature graph.",
       "isSystemic": true
     }
   ],
   "rejectedObservations": [],
-  "previousRound": null
+  "previousRound": ".factory/validation/dataset-validation/scrutiny/synthesis-round1.json"
 }
