@@ -26,6 +26,8 @@ pub struct WasmExecutorConfig {
     pub storage_host_config: StorageHostConfig,
     pub storage_backend: Arc<dyn StorageBackend>,
     pub chutes_api_key: Option<String>,
+    /// Custom environment variables passed to WASM challenges
+    pub custom_env_vars: std::collections::HashMap<String, String>,
     /// Optional distributed storage for loading WASM modules
     pub distributed_storage: Option<Arc<dyn platform_distributed_storage::DistributedStore>>,
     /// Shared chain state: LLM-capable validators (JSON bytes)
@@ -59,6 +61,7 @@ impl Default for WasmExecutorConfig {
             storage_host_config: StorageHostConfig::default(),
             storage_backend: Arc::new(InMemoryStorageBackend::new()),
             chutes_api_key: None,
+            custom_env_vars: std::collections::HashMap::new(),
             distributed_storage: None,
             llm_validators_json: Arc::new(parking_lot::RwLock::new(Vec::new())),
             registered_hotkeys_json: Arc::new(parking_lot::RwLock::new(Vec::new())),
@@ -929,6 +932,7 @@ impl WasmChallengeExecutor {
             },
             llm_validators_json: self.config.llm_validators_json.read().clone(),
             registered_hotkeys_json: self.config.registered_hotkeys_json.read().clone(),
+            custom_env_vars: self.config.custom_env_vars.clone(),
             ..Default::default()
         };
 
@@ -1100,7 +1104,10 @@ impl WasmChallengeExecutor {
                     );
                     return Ok(cached.clone());
                 }
-                debug!(module = module_path, "get_weights skipped: already running, no cache available");
+                debug!(
+                    module = module_path,
+                    "get_weights skipped: already running, no cache available"
+                );
                 return Ok(Vec::new());
             }
         };
@@ -1230,6 +1237,7 @@ impl WasmChallengeExecutor {
             state.consensus_state.epoch = epoch;
             state.fixed_timestamp_ms = Some(real_now_ms as i64);
             state.time_state.set_fixed_timestamp(real_now_ms);
+            state.custom_env_vars = self.config.custom_env_vars.clone();
         }
 
         // Reset fuel before each sync call

@@ -211,8 +211,7 @@ impl BlockSync {
                         // the broadcast channel.  After a threshold of
                         // consecutive errors we proactively recreate the
                         // listener with a fresh client.
-                        let is_connection_error =
-                            matches!(&event, BlockEvent::ConnectionError(_));
+                        let is_connection_error = matches!(&event, BlockEvent::ConnectionError(_));
 
                         let should_break = BlockSync::handle_block_event(
                             event,
@@ -250,47 +249,30 @@ impl BlockSync {
                             }
 
                             let delay_secs = 5u64;
-                            tokio::time::sleep(
-                                std::time::Duration::from_secs(delay_secs),
-                            )
-                            .await;
+                            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
 
-                            match BlockSync::recreate_listener(&rpc_url, &config)
-                                .await
-                            {
-                                Ok((
-                                    new_client,
-                                    new_listener,
-                                    new_rx,
-                                    epoch_info,
-                                )) => {
+                            match BlockSync::recreate_listener(&rpc_url, &config).await {
+                                Ok((new_client, new_listener, new_rx, epoch_info)) => {
                                     info!(
                                         block = epoch_info.current_block,
                                         epoch = epoch_info.epoch_number,
                                         "Bittensor client recreated after \
                                          consecutive connection errors"
                                     );
-                                    *current_block.write().await =
-                                        epoch_info.current_block;
-                                    *current_epoch.write().await =
-                                        epoch_info.epoch_number;
-                                    *current_phase.write().await =
-                                        epoch_info.phase;
+                                    *current_block.write().await = epoch_info.current_block;
+                                    *current_epoch.write().await = epoch_info.epoch_number;
+                                    *current_phase.write().await = epoch_info.phase;
                                     current_block_rx = new_rx;
                                     was_disconnected = true;
 
-                                    if let Err(e) =
-                                        new_listener.start(new_client).await
-                                    {
+                                    if let Err(e) = new_listener.start(new_client).await {
                                         warn!(
                                             "Failed to start recreated \
                                              listener: {}",
                                             e
                                         );
                                     } else {
-                                        let _ = event_tx
-                                            .send(BlockSyncEvent::Reconnected)
-                                            .await;
+                                        let _ = event_tx.send(BlockSyncEvent::Reconnected).await;
                                     }
                                 }
                                 Err(e) => {

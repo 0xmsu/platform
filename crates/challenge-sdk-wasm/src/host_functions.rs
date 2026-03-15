@@ -247,6 +247,7 @@ extern "C" {
     fn sandbox_exec(req_ptr: i32, req_len: i32, resp_ptr: i32, resp_len: i32) -> i32;
     fn get_timestamp() -> i64;
     fn log_message(level: i32, msg_ptr: i32, msg_len: i32);
+    fn env_get(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32;
 }
 
 pub fn host_sandbox_exec(request: &[u8]) -> Result<Vec<u8>, i32> {
@@ -272,6 +273,23 @@ pub fn host_get_timestamp() -> i64 {
 
 pub fn host_log(level: u8, msg: &str) {
     unsafe { log_message(level as i32, msg.as_ptr() as i32, msg.len() as i32) }
+}
+
+pub fn host_env_get(key: &str) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; 4096];
+    let status = unsafe {
+        env_get(
+            key.as_ptr() as i32,
+            key.len() as i32,
+            buf.as_mut_ptr() as i32,
+            buf.len() as i32,
+        )
+    };
+    if status <= 0 {
+        return None;
+    }
+    buf.truncate(status as usize);
+    Some(buf)
 }
 
 #[link(wasm_import_module = "platform_llm")]

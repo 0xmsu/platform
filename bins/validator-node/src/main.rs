@@ -284,6 +284,10 @@ struct Args {
     #[arg(long, env = "CHUTES_API_KEY")]
     chutes_api_key: Option<String>,
 
+    /// GitHub token for WASM challenges to use for API requests (avoids rate limiting)
+    #[arg(long, env = "GITHUB_TOKEN")]
+    github_token: Option<String>,
+
     /// Disable RPC server
     #[arg(long)]
     no_rpc: bool,
@@ -728,6 +732,13 @@ async fn main() -> Result<()> {
             keypair.clone(),
         )),
         chutes_api_key: args.chutes_api_key.clone(),
+        custom_env_vars: {
+            let mut env = std::collections::HashMap::new();
+            if let Some(ref token) = args.github_token {
+                env.insert("GITHUB_TOKEN".to_string(), token.clone());
+            }
+            env
+        },
         distributed_storage: Some(storage_dyn),
         llm_validators_json: Arc::clone(&shared_llm_validators_json),
         registered_hotkeys_json: Arc::clone(&shared_registered_hotkeys_json),
@@ -5238,7 +5249,11 @@ async fn handle_block_event(
                                     mechanism_id, e
                                 );
                                 needs_reconnect = true;
-                                failed_submissions.push((*mechanism_id, uids.clone(), weights.clone()));
+                                failed_submissions.push((
+                                    *mechanism_id,
+                                    uids.clone(),
+                                    weights.clone(),
+                                ));
                             } else {
                                 error!(
                                     "Mechanism {} weight submission failed: {}",
@@ -5253,10 +5268,15 @@ async fn handle_block_event(
                 drop(weights_to_submit);
 
                 if needs_reconnect && !failed_submissions.is_empty() {
-                    if try_reconnect_subtensor(subtensor, subtensor_endpoint, subtensor_state_path).await {
+                    if try_reconnect_subtensor(subtensor, subtensor_endpoint, subtensor_state_path)
+                        .await
+                    {
                         if let (Some(new_st), Some(sig)) = (subtensor.as_ref(), signer.as_ref()) {
                             for (mechanism_id, uids, weights) in &failed_submissions {
-                                info!("Retrying weight submission after reconnect for mechanism {}", mechanism_id);
+                                info!(
+                                    "Retrying weight submission after reconnect for mechanism {}",
+                                    mechanism_id
+                                );
                                 match new_st
                                     .set_mechanism_weights(
                                         sig,
@@ -5277,7 +5297,10 @@ async fn handle_block_event(
                                         *last_weight_submission_epoch = epoch;
                                     }
                                     Ok(resp) => {
-                                        warn!("Mechanism {} issue after reconnect: {}", mechanism_id, resp.message);
+                                        warn!(
+                                            "Mechanism {} issue after reconnect: {}",
+                                            mechanism_id, resp.message
+                                        );
                                     }
                                     Err(e2) => {
                                         error!(

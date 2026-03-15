@@ -141,6 +141,8 @@ pub struct InstanceConfig {
     pub llm_validators_json: Vec<u8>,
     /// JSON-encoded list of all registered hotkeys from metagraph
     pub registered_hotkeys_json: Vec<u8>,
+    /// Custom environment variables passed to WASM challenges
+    pub custom_env_vars: std::collections::HashMap<String, String>,
 }
 
 impl Default for InstanceConfig {
@@ -169,6 +171,7 @@ impl Default for InstanceConfig {
             epoch: 0,
             llm_validators_json: Vec::new(),
             registered_hotkeys_json: Vec::new(),
+            custom_env_vars: std::collections::HashMap::new(),
         }
     }
 }
@@ -208,6 +211,8 @@ pub struct RuntimeState {
     pub container_state: ContainerState,
     /// LLM state for LLM inference host operations.
     pub llm_state: LlmState,
+    /// Custom environment variables accessible from WASM
+    pub custom_env_vars: std::collections::HashMap<String, String>,
     limits: StoreLimits,
 }
 
@@ -231,6 +236,7 @@ impl RuntimeState {
         config_version: u64,
         storage_state: StorageHostState,
         fixed_timestamp_ms: Option<i64>,
+        custom_env_vars: std::collections::HashMap<String, String>,
         limits: StoreLimits,
     ) -> Self {
         Self {
@@ -251,6 +257,7 @@ impl RuntimeState {
             config_version,
             storage_state,
             fixed_timestamp_ms,
+            custom_env_vars,
             limits,
         }
     }
@@ -396,6 +403,7 @@ impl WasmRuntime {
             instance_config.config_version,
             storage_state,
             instance_config.fixed_timestamp_ms,
+            instance_config.custom_env_vars.clone(),
             limits.build(),
         );
         let mut store = Store::new(&self.engine, runtime_state);

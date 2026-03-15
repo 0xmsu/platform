@@ -33,6 +33,7 @@ pub const HOST_SANDBOX_CONFIGURE: &str = "sandbox_configure";
 pub const HOST_SANDBOX_STATUS: &str = "sandbox_status";
 pub const HOST_SANDBOX_GET_TIMESTAMP: &str = "get_timestamp";
 pub const HOST_SANDBOX_LOG_MESSAGE: &str = "log_message";
+pub const HOST_SANDBOX_ENV_GET: &str = "env_get";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -270,6 +271,26 @@ impl HostFunctionRegistrar for SandboxHostFunctions {
                 ))
             })?;
 
+        linker
+            .func_wrap(
+                HOST_SANDBOX_NAMESPACE,
+                HOST_SANDBOX_ENV_GET,
+                |mut caller: Caller<RuntimeState>,
+                 key_ptr: i32,
+                 key_len: i32,
+                 val_ptr: i32,
+                 val_len: i32|
+                 -> i32 {
+                    handle_env_get(&mut caller, key_ptr, key_len, val_ptr, val_len)
+                },
+            )
+            .map_err(|e| {
+                WasmRuntimeError::HostFunction(format!(
+                    "failed to register {}: {}",
+                    HOST_SANDBOX_ENV_GET, e
+                ))
+            })?;
+
         Ok(())
     }
 }
@@ -490,6 +511,29 @@ fn handle_log_message(caller: &mut Caller<RuntimeState>, level: i32, msg_ptr: i3
         0 => info!(challenge_id = %challenge_id, "[wasm-sandbox] {}", msg),
         1 => warn!(challenge_id = %challenge_id, "[wasm-sandbox] {}", msg),
         _ => error!(challenge_id = %challenge_id, "[wasm-sandbox] {}", msg),
+    }
+}
+
+fn handle_env_get(
+    caller: &mut Caller<RuntimeState>,
+    key_ptr: i32,
+    key_len: i32,
+    val_ptr: i32,
+    val_len: i32,
+) -> i32 {
+    let key_bytes = match read_memory(caller, key_ptr, key_len) {
+        Ok(b) => b,
+        Err(_) => return -1,
+    };
+    let key = match std::str::from_utf8(&key_bytes) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let value = caller.data().custom_env_vars.get(key).cloned();
+    match value {
+        Some(v) => write_bytes(caller, val_ptr, val_len, v.as_bytes()),
+        None => 0,
     }
 }
 
