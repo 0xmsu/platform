@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Unique challenge identifier — a human-readable string name.
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChallengeId(pub String);
 
 impl ChallengeId {
@@ -29,12 +29,6 @@ impl ChallengeId {
         } else {
             Some(Self(s.to_string()))
         }
-    }
-}
-
-impl Default for ChallengeId {
-    fn default() -> Self {
-        Self(String::new())
     }
 }
 

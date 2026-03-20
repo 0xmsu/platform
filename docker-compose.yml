@@ -27,7 +27,7 @@ services:
       - validator-data:/data
 
     environment:
-      - RUST_LOG=${RUST_LOG:-info,validator_node=debug}
+      - RUST_LOG=${RUST_LOG:-warn,validator_node=info,platform_bittensor=info,platform_p2p_consensus=warn,wasm_runtime_interface=warn,libp2p_kad=error,libp2p_gossipsub=error,tower_http=warn}
       - DATA_DIR=/data
       - VALIDATOR_SECRET_KEY=${VALIDATOR_SECRET_KEY}
       - SUBTENSOR_ENDPOINT=${SUBTENSOR_ENDPOINT:-wss://entrypoint-finney.opentensor.ai:443}

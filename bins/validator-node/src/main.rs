@@ -353,7 +353,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "info,validator_node=debug,platform_p2p_consensus=debug".into()
+                "warn,validator_node=info,platform_bittensor=info,platform_p2p_consensus=warn,wasm_runtime_interface=warn,libp2p_kad=error,libp2p_gossipsub=error,tower_http=warn".into()
             }),
         ))
         .with(sentry_tracing::layer().event_filter(|meta| {
@@ -1817,7 +1817,7 @@ async fn main() -> Result<()> {
                 // Write all consensus-reached proposals
                 for p in to_write {
                     let storage_key = StorageKey::new(
-                        &p.challenge_id.to_string(),
+                        p.challenge_id.as_ref(),
                         hex::encode(&p.key),
                     );
                     let result = if p.value.is_empty() {
@@ -3413,7 +3413,7 @@ async fn handle_network_event(
                             .apply(|state| state.remove_storage_proposal(&proposal.proposal_id));
                         if let Some(p) = proposal_opt {
                             let storage_key =
-                                StorageKey::new(&p.challenge_id.to_string(), hex::encode(&p.key));
+                                StorageKey::new(p.challenge_id.as_ref(), hex::encode(&p.key));
                             let result = if p.value.is_empty() {
                                 storage.delete(&storage_key).await
                             } else {
@@ -3499,7 +3499,7 @@ async fn handle_network_event(
                             // Use same key format as ChallengeStorageBackend:
                             // namespace = challenge_id.to_string(), key = hex::encode(key_bytes)
                             let storage_key = StorageKey::new(
-                                &proposal.challenge_id.to_string(),
+                                proposal.challenge_id.as_ref(),
                                 hex::encode(&proposal.key),
                             );
 
@@ -4313,21 +4313,13 @@ async fn handle_network_event(
 
                         // During bootstrap, always accept data from the bootstrap validator
                         // (it is the source of truth). Otherwise, only apply if newer.
-                        let should_apply = if in_bootstrap && from_bootstrap {
-                            true
-                        } else {
-                            match storage
-                                .get(&key, platform_distributed_storage::GetOptions::default())
-                                .await
-                            {
-                                Ok(Some(existing))
-                                    if existing.metadata.version >= entry.version =>
-                                {
-                                    false
-                                }
-                                _ => true,
-                            }
-                        };
+                        let should_apply = in_bootstrap && from_bootstrap
+                            || !matches!(
+                                storage
+                                    .get(&key, platform_distributed_storage::GetOptions::default())
+                                    .await,
+                                Ok(Some(existing)) if existing.metadata.version >= entry.version
+                            );
 
                         if should_apply {
                             if let Err(e) =
@@ -5063,7 +5055,7 @@ async fn handle_block_event(
                                         uids.push(0);
                                         vals.push(burn_u16);
                                     }
-                                    info!("  Burn (UID 0): {:.4} = {}", burn_weight, burn_u16);
+                                    debug!("  Burn (UID 0): {:.4} = {}", burn_weight, burn_u16);
                                 }
 
                                 if !uids.is_empty() {

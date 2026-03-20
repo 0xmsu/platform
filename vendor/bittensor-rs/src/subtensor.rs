@@ -325,6 +325,7 @@ impl Subtensor {
     /// Subtensor uses epoch-granular commit-reveal:
     /// - Commits are accepted during the ENTIRE epoch
     /// - Reveals are accepted during the ENTIRE next epoch (epoch + reveal_period)
+    ///
     /// Returns: "commit" (always - entire epoch is a commit window)
     pub async fn get_current_phase(&self, _netuid: u16) -> Result<String> {
         Ok("commit".to_string())

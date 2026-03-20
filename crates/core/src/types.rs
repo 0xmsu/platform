@@ -63,7 +63,7 @@ impl fmt::Display for Hotkey {
 }
 
 /// Challenge ID — a human-readable string name (e.g. "bounty-challenge").
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct ChallengeId(pub String);
 
 impl ChallengeId {
@@ -81,12 +81,6 @@ impl ChallengeId {
     /// Backwards-compat helper used during migration only.
     pub fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid.to_string())
-    }
-}
-
-impl Default for ChallengeId {
-    fn default() -> Self {
-        Self(String::new())
     }
 }
 
