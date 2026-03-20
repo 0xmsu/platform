@@ -1346,7 +1346,11 @@ async fn main() -> Result<()> {
                 // All validators see the same block numbers so they all submit at the same time.
                 if is_weight_block {
                     let block_number = new_block_number.unwrap();
-                    let tempo = 360u64;
+                    let tempo = if let Some(st) = subtensor.as_ref() {
+                        st.tempo(netuid).await.unwrap_or(360) as u64
+                    } else {
+                        360u64
+                    };
                     let netuid_plus_one = (netuid as u64).saturating_add(1);
                     let epoch = block_number.saturating_add(netuid_plus_one) / (tempo + 1);
                     info!(
@@ -1928,7 +1932,11 @@ async fn main() -> Result<()> {
                     if challenges.is_empty() {
                         warn!("RPC pre-compute skipped: no active challenges loaded");
                     } else {
-                        let tempo = 360u64;
+                        let tempo = if let Some(st) = subtensor.as_ref() {
+                            st.tempo(netuid).await.unwrap_or(360) as u64
+                        } else {
+                            360u64
+                        };
                         let netuid_plus_one = (netuid as u64).saturating_add(1);
                         let epoch = current_block.saturating_add(netuid_plus_one) / (tempo + 1);
                         let mut precomputed: Vec<(u8, Vec<u16>, Vec<u16>)> = Vec::new();
@@ -4942,43 +4950,27 @@ async fn handle_block_event(
             );
 
             if epoch <= *last_weight_submission_epoch {
-                info!(
+                debug!(
                     "Skipping weight submission for epoch {} (already submitted in epoch {})",
                     epoch, *last_weight_submission_epoch
                 );
                 return;
             }
 
-            // Single submission path: collect WASM weights, convert hotkey->UID,
-            // apply emission_weight, and submit directly via Subtensor.
             if let (Some(st), Some(sig)) = (subtensor.as_ref(), signer.as_ref()) {
-                // Check rate limit before submitting to avoid CommittingWeightsTooFast
-                if let Some(sc) = client.as_ref() {
-                    let our_ss58 = _keypair.ss58_address();
-                    let our_uid: u16 = sc
-                        .metagraph()
-                        .as_ref()
-                        .and_then(|mg| {
+                let our_uid: u16 = client
+                    .as_ref()
+                    .and_then(|sc| {
+                        let our_ss58 = _keypair.ss58_address();
+                        sc.metagraph().as_ref().and_then(|mg| {
                             mg.neurons
                                 .values()
                                 .find(|n| n.hotkey.to_string() == our_ss58)
                                 .map(|n| n.uid as u16)
                         })
-                        .unwrap_or(0);
-                    match st.can_set_weights(netuid, our_uid).await {
-                        Ok(false) => {
-                            warn!(
-                                "Rate limit: cannot set weights yet (uid={}), skipping epoch {}",
-                                our_uid, epoch
-                            );
-                            return;
-                        }
-                        Err(e) => {
-                            warn!("Failed to check rate limit: {}, proceeding anyway", e);
-                        }
-                        Ok(true) => {}
-                    }
-                }
+                    })
+                    .unwrap_or(0);
+
                 let mut mechanism_weights: Vec<(u8, Vec<u16>, Vec<u16>)> = Vec::new();
 
                 if let Some(ref executor) = wasm_executor {
@@ -5010,7 +5002,6 @@ async fn handle_block_event(
                             Ok(assignments) if !assignments.is_empty() => {
                                 let total_weight: f64 = assignments.iter().map(|a| a.weight).sum();
 
-                                // Use a map to merge duplicate UIDs (same hotkey appearing multiple times)
                                 let mut uid_weight_map: std::collections::BTreeMap<u16, f64> =
                                     std::collections::BTreeMap::new();
                                 let mut assigned_weight: f64 = 0.0;
@@ -5045,7 +5036,6 @@ async fn handle_block_event(
                                     }
                                 }
 
-                                // Remaining weight goes to burn (UID 0)
                                 let burn_weight = 1.0 - assigned_weight;
                                 if burn_weight > 0.001 {
                                     let burn_u16 = (burn_weight * 65535.0).round() as u16;
@@ -5059,7 +5049,6 @@ async fn handle_block_event(
                                 }
 
                                 if !uids.is_empty() {
-                                    // Max-upscale so largest = 65535 (matches convert_weights_and_uids_for_emit)
                                     let max_val = *vals.iter().max().unwrap() as f64;
                                     if max_val > 0.0 && max_val < 65535.0 {
                                         vals = vals
@@ -5106,16 +5095,18 @@ async fn handle_block_event(
                     }
                 }
 
-                // Deduplicate by mechanism_id: pick the best (most UIDs) entry per
-                // mechanism to avoid nonce conflicts from multiple submissions.
-                // Burn-only entries (single UID 0) are used only if no real weights exist.
+                // Deduplicate by mechanism_id: pick the best (most UIDs) entry per mechanism.
                 let weights_to_submit: Vec<(u8, Vec<u16>, Vec<u16>)> =
                     if mechanism_weights.is_empty() {
                         let mechanism_id = {
                             let cs = chain_state.read();
                             cs.mechanism_configs.keys().next().copied().unwrap_or(0u8)
                         };
-                        info!("No weights - submitting burn weights to UID 0");
+                        warn!(
+                            epoch = epoch,
+                            block = block,
+                            "No WASM weights available - submitting burn weights to UID 0"
+                        );
                         vec![(mechanism_id, vec![0u16], vec![65535u16])]
                     } else {
                         use std::collections::BTreeMap;
@@ -5128,7 +5119,6 @@ async fn handle_block_event(
                                 None => true,
                                 Some((ex_uids, _)) => {
                                     let ex_is_burn = ex_uids.len() == 1 && ex_uids[0] == 0;
-                                    // Prefer real weights over burn; among real, prefer more UIDs
                                     if is_burn_only && !ex_is_burn {
                                         false
                                     } else if !is_burn_only && ex_is_burn {
@@ -5165,7 +5155,6 @@ async fn handle_block_event(
 
                 // ALL validators (including bootstrap) fetch weights from the
                 // bootstrap RPC to guarantee everyone submits identical weights.
-                // Local computation is used only as fallback if the RPC is unreachable.
                 let weights_to_submit = {
                     info!("Fetching weights from bootstrap validator RPC");
                     match fetch_remote_weights().await {
@@ -5177,13 +5166,19 @@ async fn handle_block_event(
                             remote
                         }
                         Ok(_) => {
-                            warn!("Remote weights empty, falling back to locally computed");
+                            warn!(
+                                epoch = epoch,
+                                block = block,
+                                "Remote weights empty, falling back to locally computed"
+                            );
                             weights_to_submit
                         }
                         Err(e) => {
                             warn!(
-                                "Failed to fetch remote weights ({}), falling back to locally computed",
-                                e
+                                epoch = epoch,
+                                block = block,
+                                error = %e,
+                                "Failed to fetch remote weights, falling back to locally computed"
                             );
                             weights_to_submit
                         }
@@ -5196,10 +5191,35 @@ async fn handle_block_event(
                     cs.last_computed_weights = weights_to_submit.clone();
                 }
 
+                let total_mechanisms = weights_to_submit.len();
+                let mut succeeded_mechanisms: Vec<u8> = Vec::new();
+                let mut failed_mechanisms: Vec<u8> = Vec::new();
                 let mut needs_reconnect = false;
                 let mut failed_submissions: Vec<(u8, Vec<u16>, Vec<u16>)> = Vec::new();
 
                 for (mechanism_id, uids, weights) in &weights_to_submit {
+                    // Per-mechanism rate limit check
+                    match st.can_set_weights(netuid, our_uid, *mechanism_id).await {
+                        Ok(false) => {
+                            warn!(
+                                epoch = epoch,
+                                mechanism_id = mechanism_id,
+                                uid = our_uid,
+                                "Rate limit: cannot set weights yet for mechanism, will retry next window"
+                            );
+                            failed_mechanisms.push(*mechanism_id);
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(
+                                mechanism_id = mechanism_id,
+                                error = %e,
+                                "Failed to check rate limit, proceeding anyway"
+                            );
+                        }
+                        Ok(true) => {}
+                    }
+
                     info!(
                         "Submitting weights for mechanism {} ({} UIDs)",
                         mechanism_id,
@@ -5218,29 +5238,44 @@ async fn handle_block_event(
                         .await
                     {
                         Ok(resp) if resp.success => {
-                            info!(
-                                "Mechanism {} weights submitted: {:?}",
-                                mechanism_id, resp.tx_hash
+                            warn!(
+                                epoch = epoch,
+                                mechanism_id = mechanism_id,
+                                tx_hash = ?resp.tx_hash,
+                                uid_count = uids.len(),
+                                "Weight submission SUCCESS"
                             );
-                            *last_weight_submission_epoch = epoch;
+                            succeeded_mechanisms.push(*mechanism_id);
                         }
                         Ok(resp) => {
-                            warn!("Mechanism {} issue: {}", mechanism_id, resp.message);
+                            error!(
+                                epoch = epoch,
+                                mechanism_id = mechanism_id,
+                                message = %resp.message,
+                                "Weight submission returned non-success response, will retry"
+                            );
+                            failed_mechanisms.push(*mechanism_id);
+                            failed_submissions.push((*mechanism_id, uids.clone(), weights.clone()));
                         }
                         Err(e) => {
                             let err_str = format!("{}", e);
                             if err_str.contains("Priority is too low") || err_str.contains("1010") {
                                 warn!(
-                                    "Mechanism {}: transaction rejected ({}) - marking epoch as submitted to avoid retry loop",
-                                    mechanism_id, err_str
+                                    epoch = epoch,
+                                    mechanism_id = mechanism_id,
+                                    error = %err_str,
+                                    "Transaction priority conflict, will retry next window (NOT marking epoch as done)"
                                 );
-                                *last_weight_submission_epoch = epoch;
+                                failed_mechanisms.push(*mechanism_id);
                             } else if is_transport_error(&err_str) {
                                 error!(
-                                    "Mechanism {} weight submission failed (transport error): {}",
-                                    mechanism_id, e
+                                    epoch = epoch,
+                                    mechanism_id = mechanism_id,
+                                    error = %e,
+                                    "Weight submission transport error, will reconnect and retry"
                                 );
                                 needs_reconnect = true;
+                                failed_mechanisms.push(*mechanism_id);
                                 failed_submissions.push((
                                     *mechanism_id,
                                     uids.clone(),
@@ -5248,9 +5283,12 @@ async fn handle_block_event(
                                 ));
                             } else {
                                 error!(
-                                    "Mechanism {} weight submission failed: {}",
-                                    mechanism_id, e
+                                    epoch = epoch,
+                                    mechanism_id = mechanism_id,
+                                    error = %e,
+                                    "Weight submission failed (unknown error), will retry next window"
                                 );
+                                failed_mechanisms.push(*mechanism_id);
                             }
                         }
                     }
@@ -5259,15 +5297,17 @@ async fn handle_block_event(
                 // Drop immutable borrows of subtensor (st, sig) before reconnecting
                 drop(weights_to_submit);
 
+                // Reconnect and retry transport failures
                 if needs_reconnect && !failed_submissions.is_empty() {
                     if try_reconnect_subtensor(subtensor, subtensor_endpoint, subtensor_state_path)
                         .await
                     {
                         if let (Some(new_st), Some(sig)) = (subtensor.as_ref(), signer.as_ref()) {
                             for (mechanism_id, uids, weights) in &failed_submissions {
-                                info!(
-                                    "Retrying weight submission after reconnect for mechanism {}",
-                                    mechanism_id
+                                warn!(
+                                    epoch = epoch,
+                                    mechanism_id = mechanism_id,
+                                    "Retrying weight submission after reconnect"
                                 );
                                 match new_st
                                     .set_mechanism_weights(
@@ -5282,31 +5322,75 @@ async fn handle_block_event(
                                     .await
                                 {
                                     Ok(resp) if resp.success => {
-                                        info!(
-                                            "Mechanism {} weights submitted after reconnect: {:?}",
-                                            mechanism_id, resp.tx_hash
+                                        warn!(
+                                            epoch = epoch,
+                                            mechanism_id = mechanism_id,
+                                            tx_hash = ?resp.tx_hash,
+                                            "Weight submission SUCCESS after reconnect"
                                         );
-                                        *last_weight_submission_epoch = epoch;
+                                        succeeded_mechanisms.push(*mechanism_id);
+                                        failed_mechanisms.retain(|m| m != mechanism_id);
                                     }
                                     Ok(resp) => {
-                                        warn!(
-                                            "Mechanism {} issue after reconnect: {}",
-                                            mechanism_id, resp.message
+                                        error!(
+                                            epoch = epoch,
+                                            mechanism_id = mechanism_id,
+                                            message = %resp.message,
+                                            "Weight submission non-success after reconnect"
                                         );
                                     }
                                     Err(e2) => {
                                         error!(
-                                            "Mechanism {} weight submission failed even after reconnect: {}",
-                                            mechanism_id, e2
+                                            epoch = epoch,
+                                            mechanism_id = mechanism_id,
+                                            error = %e2,
+                                            "Weight submission failed even after reconnect"
                                         );
                                     }
                                 }
                             }
                         }
+                    } else {
+                        error!(
+                            epoch = epoch,
+                            "Subtensor reconnect failed, weight submissions lost for this window"
+                        );
                     }
                 }
+
+                // Only mark epoch as submitted if ALL mechanisms succeeded
+                if !succeeded_mechanisms.is_empty() && failed_mechanisms.is_empty() {
+                    *last_weight_submission_epoch = epoch;
+                    warn!(
+                        epoch = epoch,
+                        succeeded = succeeded_mechanisms.len(),
+                        total = total_mechanisms,
+                        "All weight submissions succeeded, epoch marked complete"
+                    );
+                } else if !succeeded_mechanisms.is_empty() {
+                    // Partial success: do NOT mark epoch as done so failed mechanisms can retry
+                    warn!(
+                        epoch = epoch,
+                        succeeded = succeeded_mechanisms.len(),
+                        failed = failed_mechanisms.len(),
+                        total = total_mechanisms,
+                        failed_ids = ?failed_mechanisms,
+                        "Partial weight submission: NOT marking epoch as done, will retry failed mechanisms"
+                    );
+                } else {
+                    error!(
+                        epoch = epoch,
+                        total = total_mechanisms,
+                        failed_ids = ?failed_mechanisms,
+                        "All weight submissions failed for this epoch, will retry next window"
+                    );
+                }
             } else {
-                warn!("No Subtensor/signer - cannot submit weights");
+                error!(
+                    epoch = epoch,
+                    block = block,
+                    "No Subtensor/signer available - cannot submit weights"
+                );
             }
         }
         BlockSyncEvent::RevealWindowOpen { epoch, block } => {

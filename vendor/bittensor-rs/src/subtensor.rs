@@ -249,12 +249,17 @@ impl Subtensor {
             .map(|v| v.unwrap_or(0))
     }
 
-    /// Get blocks since last update for a neuron
-    pub async fn blocks_since_last_update(&self, netuid: u16, uid: u16) -> Result<u64> {
+    /// Get blocks since last update for a neuron on a specific mechanism
+    pub async fn blocks_since_last_update(
+        &self,
+        netuid: u16,
+        uid: u16,
+        mechanism_id: u8,
+    ) -> Result<u64> {
         use crate::utils::decoders::decode_u64;
         use subxt::dynamic::Value;
 
-        let storage_index = get_mechid_storage_index(netuid, 0);
+        let storage_index = get_mechid_storage_index(netuid, mechanism_id);
         if let Some(val) = self
             .client
             .storage_with_keys(
@@ -271,9 +276,11 @@ impl Subtensor {
         Ok(0)
     }
 
-    /// Check if rate limit allows setting weights
-    pub async fn can_set_weights(&self, netuid: u16, uid: u16) -> Result<bool> {
-        let bslu = self.blocks_since_last_update(netuid, uid).await?;
+    /// Check if rate limit allows setting weights for a specific mechanism
+    pub async fn can_set_weights(&self, netuid: u16, uid: u16, mechanism_id: u8) -> Result<bool> {
+        let bslu = self
+            .blocks_since_last_update(netuid, uid, mechanism_id)
+            .await?;
         let wrl = self.weights_rate_limit(netuid).await?;
         Ok(bslu > wrl)
     }
