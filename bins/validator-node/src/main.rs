@@ -522,11 +522,11 @@ async fn main() -> Result<()> {
 
     // Connect to Bittensor
     let mut subtensor: Option<Arc<Subtensor>>;
-    let subtensor_signer: Option<Arc<BittensorSigner>>;
+    let mut subtensor_signer: Option<Arc<BittensorSigner>>;
     let subtensor_endpoint_for_reconnect = args.subtensor_endpoint.clone();
-    let subtensor_state_path_for_reconnect: Option<std::path::PathBuf>;
+    let mut subtensor_state_path_for_reconnect: Option<std::path::PathBuf>;
     let mut subtensor_client: Option<SubtensorClient>;
-    let bittensor_client_for_metagraph: Option<Arc<BittensorClient>>;
+    let mut bittensor_client_for_metagraph: Option<Arc<BittensorClient>>;
     let mut block_rx: Option<tokio::sync::mpsc::Receiver<BlockSyncEvent>> = None;
 
     if !args.no_bittensor {
@@ -591,99 +591,128 @@ async fn main() -> Result<()> {
             // Full validator mode: requires signing key
             let state_path = data_dir.join("subtensor_state.json");
             subtensor_state_path_for_reconnect = Some(state_path.clone());
-            match Subtensor::with_persistence(&args.subtensor_endpoint, state_path).await {
-                Ok(st) => {
-                    let secret = args
-                        .secret_key
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("VALIDATOR_SECRET_KEY required"))?;
+            subtensor = None;
+            subtensor_signer = None;
+            subtensor_client = None;
+            bittensor_client_for_metagraph = None;
 
-                    let signer = signer_from_seed(secret).map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to create Bittensor signer from secret key: {}. \
-                            A valid signer is required for weight submission. \
-                            Use --no-bittensor flag if running without Bittensor.",
-                            e
-                        )
-                    })?;
-                    info!("Bittensor signer initialized: {}", signer.account_id());
-                    subtensor_signer = Some(Arc::new(signer));
+            const FINNEY_FALLBACK: &str = "wss://entrypoint-finney.opentensor.ai:443";
+            let endpoints_to_try: Vec<String> = if args.subtensor_endpoint == FINNEY_FALLBACK {
+                vec![args.subtensor_endpoint.clone()]
+            } else {
+                vec![args.subtensor_endpoint.clone(), FINNEY_FALLBACK.to_string()]
+            };
 
-                    subtensor = Some(Arc::new(st));
+            let mut connected = false;
+            for endpoint in &endpoints_to_try {
+                info!("Trying Subtensor endpoint: {}", endpoint);
+                match Subtensor::with_persistence(endpoint, state_path.clone()).await {
+                    Ok(st) => {
+                        let secret = args
+                            .secret_key
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("VALIDATOR_SECRET_KEY required"))?;
 
-                    // Create SubtensorClient for metagraph
-                    let mut client = SubtensorClient::new(platform_bittensor::BittensorConfig {
-                        endpoint: args.subtensor_endpoint.clone(),
-                        netuid: args.netuid,
-                        ..Default::default()
-                    });
+                        let signer = signer_from_seed(secret).map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to create Bittensor signer from secret key: {}. \
+                                A valid signer is required for weight submission. \
+                                Use --no-bittensor flag if running without Bittensor.",
+                                e
+                            )
+                        })?;
+                        info!("Bittensor signer initialized: {}", signer.account_id());
+                        subtensor_signer = Some(Arc::new(signer));
 
-                    let bittensor_client =
-                        Arc::new(BittensorClient::new(&args.subtensor_endpoint).await?);
-                    match sync_metagraph(&bittensor_client, args.netuid).await {
-                        Ok(mg) => {
-                            info!("Metagraph synced: {} neurons", mg.n);
+                        subtensor = Some(Arc::new(st));
 
-                            // Update validator set from metagraph
-                            let our_hk = keypair.hotkey();
-                            update_validator_set_from_metagraph(
-                                &mg,
-                                &validator_set,
-                                &chain_state,
-                                &valid_voters,
-                                &state_root_consensus,
-                                &state_manager,
-                                Some(&our_hk),
-                            );
-                            info!(
-                                "Validator set: {} active validators",
-                                validator_set.active_count()
-                            );
+                        let mut client =
+                            SubtensorClient::new(platform_bittensor::BittensorConfig {
+                                endpoint: endpoint.clone(),
+                                netuid: args.netuid,
+                                ..Default::default()
+                            });
 
-                            // Update shared UID map for real-time weight RPC
-                            {
-                                let mut uid_map = shared_uid_map.write();
-                                uid_map.clear();
-                                for (uid, neuron) in &mg.neurons {
-                                    uid_map.insert(neuron.hotkey.to_string(), *uid as u16);
+                        let bittensor_client = Arc::new(BittensorClient::new(endpoint).await?);
+                        match sync_metagraph(&bittensor_client, args.netuid).await {
+                            Ok(mg) => {
+                                info!("Metagraph synced: {} neurons", mg.n);
+
+                                let our_hk = keypair.hotkey();
+                                update_validator_set_from_metagraph(
+                                    &mg,
+                                    &validator_set,
+                                    &chain_state,
+                                    &valid_voters,
+                                    &state_root_consensus,
+                                    &state_manager,
+                                    Some(&our_hk),
+                                );
+                                info!(
+                                    "Validator set: {} active validators",
+                                    validator_set.active_count()
+                                );
+
+                                {
+                                    let mut uid_map = shared_uid_map.write();
+                                    uid_map.clear();
+                                    for (uid, neuron) in &mg.neurons {
+                                        uid_map.insert(neuron.hotkey.to_string(), *uid as u16);
+                                    }
                                 }
+                                client.set_metagraph(mg);
                             }
-                            client.set_metagraph(mg);
+                            Err(e) => warn!("Metagraph sync failed: {}", e),
                         }
-                        Err(e) => warn!("Metagraph sync failed: {}", e),
-                    }
 
-                    subtensor_client = Some(client);
+                        subtensor_client = Some(client);
+                        bittensor_client_for_metagraph = Some(bittensor_client.clone());
 
-                    // Store bittensor client for metagraph refreshes
-                    bittensor_client_for_metagraph = Some(bittensor_client.clone());
-
-                    // Block sync
-                    let mut sync = BlockSync::new(BlockSyncConfig {
-                        netuid: args.netuid,
-                        ..Default::default()
-                    });
-                    let rx = sync.take_event_receiver();
-
-                    if let Err(e) = sync.connect(bittensor_client).await {
-                        warn!("Block sync failed: {}", e);
-                    } else {
-                        tokio::spawn(async move {
-                            if let Err(e) = sync.start().await {
-                                error!("Block sync error: {}", e);
-                            }
+                        let mut sync = BlockSync::new(BlockSyncConfig {
+                            netuid: args.netuid,
+                            ..Default::default()
                         });
-                        block_rx = rx;
-                        info!("Block sync started");
+                        let rx = sync.take_event_receiver();
+
+                        if let Err(e) = sync.connect(bittensor_client).await {
+                            warn!("Block sync failed: {}", e);
+                        } else {
+                            tokio::spawn(async move {
+                                if let Err(e) = sync.start().await {
+                                    error!("Block sync error: {}", e);
+                                }
+                            });
+                            block_rx = rx;
+                            info!("Block sync started");
+                        }
+
+                        if endpoint != &args.subtensor_endpoint {
+                            warn!(
+                                "Connected to fallback Finney endpoint {} (primary {} failed)",
+                                endpoint, args.subtensor_endpoint
+                            );
+                        } else {
+                            info!("Connected to Subtensor: {}", endpoint);
+                        }
+                        connected = true;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("Subtensor connection to {} failed: {}", endpoint, e);
                     }
                 }
-                Err(e) => {
-                    error!("Subtensor connection failed: {}", e);
-                    subtensor = None;
-                    subtensor_signer = None;
-                    subtensor_client = None;
-                    bittensor_client_for_metagraph = None;
-                }
+            }
+
+            if !connected {
+                error!(
+                    "All Subtensor endpoints failed (tried: {:?}). Running without Bittensor.",
+                    endpoints_to_try
+                );
+                subtensor = None;
+                subtensor_signer = None;
+                subtensor_state_path_for_reconnect = None;
+                subtensor_client = None;
+                bittensor_client_for_metagraph = None;
             }
         }
     } else {
@@ -4731,23 +4760,43 @@ async fn try_reconnect_subtensor(
     endpoint: &str,
     state_path: &Option<std::path::PathBuf>,
 ) -> bool {
-    info!("Attempting Subtensor RPC reconnection to {}", endpoint);
-    let result = if let Some(sp) = state_path {
-        Subtensor::with_persistence(endpoint, sp.clone()).await
+    const FINNEY_FALLBACK: &str = "wss://entrypoint-finney.opentensor.ai:443";
+    let endpoints: Vec<&str> = if endpoint == FINNEY_FALLBACK {
+        vec![endpoint]
     } else {
-        Subtensor::new(endpoint).await
+        vec![endpoint, FINNEY_FALLBACK]
     };
-    match result {
-        Ok(st) => {
-            *subtensor = Some(Arc::new(st));
-            info!("Subtensor RPC reconnected successfully");
-            true
-        }
-        Err(e) => {
-            error!("Subtensor RPC reconnection failed: {}", e);
-            false
+
+    for ep in &endpoints {
+        info!("Attempting Subtensor RPC reconnection to {}", ep);
+        let result = if let Some(sp) = state_path {
+            Subtensor::with_persistence(ep, sp.clone()).await
+        } else {
+            Subtensor::new(ep).await
+        };
+        match result {
+            Ok(st) => {
+                *subtensor = Some(Arc::new(st));
+                if *ep != endpoint {
+                    warn!(
+                        "Subtensor reconnected via fallback Finney endpoint (primary {} failed)",
+                        endpoint
+                    );
+                } else {
+                    info!("Subtensor RPC reconnected successfully to {}", ep);
+                }
+                return true;
+            }
+            Err(e) => {
+                warn!("Subtensor reconnection to {} failed: {}", ep, e);
+            }
         }
     }
+    error!(
+        "All Subtensor reconnection attempts failed (tried: {:?})",
+        endpoints
+    );
+    false
 }
 
 fn is_transport_error(err_str: &str) -> bool {

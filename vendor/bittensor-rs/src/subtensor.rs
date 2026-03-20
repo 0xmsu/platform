@@ -409,17 +409,15 @@ impl Subtensor {
         version_key: u64,
         wait_for: ExtrinsicWait,
     ) -> Result<WeightResponse> {
-        // Check if commit-reveal is enabled
         let cr_enabled = self.commit_reveal_enabled(netuid).await?;
 
         if cr_enabled {
             let crv_version = self.get_commit_reveal_version().await?;
 
             if crv_version >= 4 {
-                // CRv4: Timelock encryption - chain auto-reveals
-                info!(
-                    "Using CRv4 (timelock encryption) for netuid={}, mechanism={}",
-                    netuid, mechanism_id
+                warn!(
+                    "Using CRv4 (timelock encryption) for netuid={}, mechanism={}, crv={}",
+                    netuid, mechanism_id, crv_version
                 );
                 self.set_weights_crv4(
                     signer,
@@ -432,10 +430,9 @@ impl Subtensor {
                 )
                 .await
             } else {
-                // Legacy commit-reveal
-                info!(
-                    "Using legacy commit-reveal for netuid={}, mechanism={}",
-                    netuid, mechanism_id
+                warn!(
+                    "Using legacy commit-reveal for netuid={}, mechanism={}, crv={}",
+                    netuid, mechanism_id, crv_version
                 );
                 self.set_weights_commit_reveal(
                     signer,
@@ -449,9 +446,8 @@ impl Subtensor {
                 .await
             }
         } else {
-            // Direct set_weights
-            info!(
-                "Using direct set_weights for netuid={}, mechanism={}",
+            warn!(
+                "Using direct set_weights for netuid={}, mechanism={} (commit-reveal disabled)",
                 netuid, mechanism_id
             );
             self.set_weights_direct(
