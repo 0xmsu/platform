@@ -1255,6 +1255,8 @@ async fn main() -> Result<()> {
     let mut storage_stats_interval = tokio::time::interval(Duration::from_secs(300));
     let mut storage_flush_interval = tokio::time::interval(Duration::from_secs(5));
     let mut background_tick_interval = tokio::time::interval(Duration::from_secs(12));
+    let mut bittensor_health_interval = tokio::time::interval(Duration::from_secs(300));
+    let mut last_block_event_time = std::time::Instant::now();
     // Track last synced block per challenge for delta sync
     let challenge_last_sync: Arc<
         RwLock<std::collections::HashMap<platform_core::ChallengeId, u64>>,
@@ -1293,6 +1295,8 @@ async fn main() -> Result<()> {
                     None => std::future::pending().await,
                 }
             } => {
+                last_block_event_time = std::time::Instant::now();
+
                 // Check if this block triggers weight submission (every WEIGHT_SET_BLOCK_INTERVAL blocks)
                 let is_weight_block = if let BlockSyncEvent::NewBlock { block_number, .. } = &event {
                     *block_number > 0
@@ -1303,6 +1307,7 @@ async fn main() -> Result<()> {
 
                 // Force metagraph refresh before weight submission
                 if is_weight_block || matches!(event, BlockSyncEvent::CommitWindowOpen { .. }) {
+                    let mut refresh_ok = false;
                     if let Some(bittensor_client) = bittensor_client_for_metagraph.as_ref() {
                         match tokio::time::timeout(
                             Duration::from_secs(15),
@@ -1312,7 +1317,6 @@ async fn main() -> Result<()> {
                                 info!("Pre-weight metagraph refresh: {} neurons", mg.n);
                                 let our_hk = keypair.hotkey();
                                 update_validator_set_from_metagraph(&mg, &validator_set, &chain_state, &valid_voters, &state_root_consensus, &state_manager, Some(&our_hk));
-                                // Update shared UID map for real-time weight RPC
                                 {
                                     let mut uid_map = shared_uid_map.write();
                                     uid_map.clear();
@@ -1323,12 +1327,59 @@ async fn main() -> Result<()> {
                                 if let Some(sc) = subtensor_client.as_mut() {
                                     sc.set_metagraph(mg);
                                 }
+                                refresh_ok = true;
                             }
                             Ok(Err(e)) => {
-                                warn!("Pre-weight metagraph refresh failed: {}. Using cached.", e);
+                                let err_str = format!("{}", e);
+                                if err_str.contains("background task") || err_str.contains("connection closed") {
+                                    warn!("Bittensor client dead ({}), recreating...", e);
+                                } else {
+                                    warn!("Pre-weight metagraph refresh failed: {}. Using cached.", e);
+                                    refresh_ok = true; // non-fatal, keep going with cached
+                                }
                             }
                             Err(_) => {
                                 warn!("Pre-weight metagraph refresh timed out (15s). Using cached.");
+                                refresh_ok = true;
+                            }
+                        }
+                    }
+                    // Recreate bittensor client if dead or missing
+                    if !refresh_ok {
+                        warn!("Recreating Bittensor client for metagraph refresh");
+                        match BittensorClient::new(&subtensor_endpoint_for_reconnect).await {
+                            Ok(new_client) => {
+                                let new_client = Arc::new(new_client);
+                                match tokio::time::timeout(
+                                    Duration::from_secs(15),
+                                    sync_metagraph(&new_client, netuid),
+                                ).await {
+                                    Ok(Ok(mg)) => {
+                                        warn!("Metagraph refresh OK after client recreation: {} neurons", mg.n);
+                                        let our_hk = keypair.hotkey();
+                                        update_validator_set_from_metagraph(&mg, &validator_set, &chain_state, &valid_voters, &state_root_consensus, &state_manager, Some(&our_hk));
+                                        {
+                                            let mut uid_map = shared_uid_map.write();
+                                            uid_map.clear();
+                                            for (uid, neuron) in &mg.neurons {
+                                                uid_map.insert(neuron.hotkey.to_string(), *uid as u16);
+                                            }
+                                        }
+                                        if let Some(sc) = subtensor_client.as_mut() {
+                                            sc.set_metagraph(mg);
+                                        }
+                                        bittensor_client_for_metagraph = Some(new_client);
+                                    }
+                                    Ok(Err(e)) => {
+                                        error!("Metagraph refresh failed even after client recreation: {}", e);
+                                    }
+                                    Err(_) => {
+                                        error!("Metagraph refresh timed out even after client recreation");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to recreate Bittensor client: {}", e);
                             }
                         }
                     }
@@ -1356,6 +1407,7 @@ async fn main() -> Result<()> {
                     &mut last_weight_submission_epoch,
                     &subtensor_endpoint_for_reconnect,
                     &subtensor_state_path_for_reconnect,
+                    &mut bittensor_client_for_metagraph,
                 ).await;
 
                 // On first block after startup, compute weights immediately so
@@ -1403,6 +1455,7 @@ async fn main() -> Result<()> {
                         &mut last_weight_submission_epoch,
                         &subtensor_endpoint_for_reconnect,
                         &subtensor_state_path_for_reconnect,
+                        &mut bittensor_client_for_metagraph,
                     ).await;
                 }
             }
@@ -2175,6 +2228,36 @@ async fn main() -> Result<()> {
                         current_block = storage.current_block(),
                         "Storage statistics"
                     );
+                }
+            }
+
+            // Bittensor connection health-check
+            _ = bittensor_health_interval.tick() => {
+                if !args.no_bittensor && block_rx.is_some() {
+                    let secs_since_last = last_block_event_time.elapsed().as_secs();
+                    if secs_since_last > 300 {
+                        error!(
+                            seconds_since_last_block = secs_since_last,
+                            "No Bittensor block events received in {}s - connection likely dead, reconnecting Subtensor",
+                            secs_since_last
+                        );
+                        // Reconnect subtensor for weight submission
+                        try_reconnect_subtensor(
+                            &mut subtensor,
+                            &subtensor_endpoint_for_reconnect,
+                            &subtensor_state_path_for_reconnect,
+                        ).await;
+                        // Recreate bittensor client for metagraph
+                        match BittensorClient::new(&subtensor_endpoint_for_reconnect).await {
+                            Ok(new_client) => {
+                                bittensor_client_for_metagraph = Some(Arc::new(new_client));
+                                warn!("Bittensor client recreated after health-check failure");
+                            }
+                            Err(e) => {
+                                error!("Failed to recreate Bittensor client during health-check: {}", e);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -4823,6 +4906,7 @@ async fn handle_block_event(
     last_weight_submission_epoch: &mut u64,
     subtensor_endpoint: &str,
     subtensor_state_path: &Option<std::path::PathBuf>,
+    bittensor_client_for_metagraph: &mut Option<Arc<BittensorClient>>,
 ) {
     match event {
         BlockSyncEvent::NewBlock { block_number, .. } => {
@@ -5330,6 +5414,22 @@ async fn handle_block_event(
                                     uids.clone(),
                                     weights.clone(),
                                 ));
+                            } else if err_str.contains("HotKeyNotRegisteredInSubNet") {
+                                error!(
+                                    epoch = epoch,
+                                    mechanism_id = mechanism_id,
+                                    error = %err_str,
+                                    "Hotkey not registered on subnet - check registration status"
+                                );
+                                failed_mechanisms.push(*mechanism_id);
+                            } else if err_str.contains("CommittingWeightsTooFast") {
+                                warn!(
+                                    epoch = epoch,
+                                    mechanism_id = mechanism_id,
+                                    error = %err_str,
+                                    "Committing weights too fast (rate limited by chain), will retry next window"
+                                );
+                                failed_mechanisms.push(*mechanism_id);
                             } else {
                                 error!(
                                     epoch = epoch,
@@ -5483,8 +5583,20 @@ async fn handle_block_event(
             warn!("Bittensor disconnected: {}", reason);
         }
         BlockSyncEvent::Reconnected => {
-            info!("Bittensor block sync reconnected - also reconnecting Subtensor weight submission client");
+            warn!("Bittensor block sync reconnected - reconnecting Subtensor and metagraph client");
             try_reconnect_subtensor(subtensor, subtensor_endpoint, subtensor_state_path).await;
+            match BittensorClient::new(subtensor_endpoint).await {
+                Ok(new_client) => {
+                    *bittensor_client_for_metagraph = Some(Arc::new(new_client));
+                    warn!("Bittensor metagraph client recreated after reconnect");
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to recreate Bittensor metagraph client after reconnect: {}",
+                        e
+                    );
+                }
+            }
         }
     }
 }
