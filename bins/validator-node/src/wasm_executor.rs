@@ -139,6 +139,10 @@ struct PersistentInstance {
 
 // ChallengeInstance contains wasmtime Store which is Send but not Sync.
 // We protect access with a Mutex so only one call at a time.
+// SAFETY: PersistentInstance is Send because:
+// - The inner ChallengeInstance (wasmtime Store) is Send as guaranteed by wasmtime
+// - All access is protected by parking_lot::Mutex, ensuring exclusive access
+// - No data races can occur as Mutex provides synchronization
 unsafe impl Send for PersistentInstance {}
 
 pub struct WasmChallengeExecutor {

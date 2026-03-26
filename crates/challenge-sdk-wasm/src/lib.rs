@@ -152,6 +152,8 @@ macro_rules! register_challenge {
 
         #[no_mangle]
         pub extern "C" fn evaluate(agent_ptr: i32, agent_len: i32) -> i64 {
+            // SAFETY: The host runtime passes valid pointer/length pairs for serialized data.
+            // The pointer is within WASM linear memory bounds and points to valid data.
             let slice =
                 unsafe { core::slice::from_raw_parts(agent_ptr as *const u8, agent_len as usize) };
             let input: $crate::EvaluationInput = match bincode::deserialize(slice) {
@@ -171,6 +173,8 @@ macro_rules! register_challenge {
             if ptr.is_null() {
                 return $crate::pack_ptr_len(0, 0);
             }
+            // SAFETY: sdk_alloc returns a valid, aligned pointer with enough space for encoded.len()
+            // bytes, or null on allocation failure (handled above).
             unsafe {
                 core::ptr::copy_nonoverlapping(encoded.as_ptr(), ptr, encoded.len());
             }
@@ -179,6 +183,8 @@ macro_rules! register_challenge {
 
         #[no_mangle]
         pub extern "C" fn validate(agent_ptr: i32, agent_len: i32) -> i32 {
+            // SAFETY: The host runtime passes valid pointer/length pairs for serialized data.
+            // The pointer is within WASM linear memory bounds and points to valid data.
             let slice =
                 unsafe { core::slice::from_raw_parts(agent_ptr as *const u8, agent_len as usize) };
             let input: $crate::EvaluationInput = match bincode::deserialize(slice) {
@@ -200,6 +206,8 @@ macro_rules! register_challenge {
                 return 0;
             }
             let len_bytes = (name.len() as u32).to_le_bytes();
+            // SAFETY: sdk_alloc returns a valid, aligned pointer with enough space for 4 + name.len()
+            // bytes. ptr.add(4) is valid because we allocated enough space.
             unsafe {
                 core::ptr::copy_nonoverlapping(len_bytes.as_ptr(), ptr, 4);
                 core::ptr::copy_nonoverlapping(name.as_ptr(), ptr.add(4), name.len());
@@ -215,6 +223,8 @@ macro_rules! register_challenge {
                 return 0;
             }
             let len_bytes = (ver.len() as u32).to_le_bytes();
+            // SAFETY: sdk_alloc returns a valid, aligned pointer with enough space for 4 + ver.len()
+            // bytes. ptr.add(4) is valid because we allocated enough space.
             unsafe {
                 core::ptr::copy_nonoverlapping(len_bytes.as_ptr(), ptr, 4);
                 core::ptr::copy_nonoverlapping(ver.as_ptr(), ptr.add(4), ver.len());
@@ -224,6 +234,8 @@ macro_rules! register_challenge {
 
         #[no_mangle]
         pub extern "C" fn generate_task(params_ptr: i32, params_len: i32) -> i64 {
+            // SAFETY: The host runtime passes valid pointer/length pairs for serialized data.
+            // The pointer is within WASM linear memory bounds and points to valid data.
             let slice = unsafe {
                 core::slice::from_raw_parts(params_ptr as *const u8, params_len as usize)
             };
@@ -235,6 +247,8 @@ macro_rules! register_challenge {
             if ptr.is_null() {
                 return $crate::pack_ptr_len(0, 0);
             }
+            // SAFETY: sdk_alloc returns a valid, aligned pointer with enough space for output.len()
+            // bytes, or null on allocation failure (handled above).
             unsafe {
                 core::ptr::copy_nonoverlapping(output.as_ptr(), ptr, output.len());
             }
@@ -243,6 +257,8 @@ macro_rules! register_challenge {
 
         #[no_mangle]
         pub extern "C" fn setup_environment(config_ptr: i32, config_len: i32) -> i32 {
+            // SAFETY: The host runtime passes valid pointer/length pairs for serialized data.
+            // The pointer is within WASM linear memory bounds and points to valid data.
             let slice = unsafe {
                 core::slice::from_raw_parts(config_ptr as *const u8, config_len as usize)
             };
@@ -263,6 +279,8 @@ macro_rules! register_challenge {
             if ptr.is_null() {
                 return $crate::pack_ptr_len(0, 0);
             }
+            // SAFETY: sdk_alloc returns a valid, aligned pointer with enough space for output.len()
+            // bytes, or null on allocation failure (handled above).
             unsafe {
                 core::ptr::copy_nonoverlapping(output.as_ptr(), ptr, output.len());
             }
@@ -271,6 +289,8 @@ macro_rules! register_challenge {
 
         #[no_mangle]
         pub extern "C" fn configure(config_ptr: i32, config_len: i32) -> i32 {
+            // SAFETY: The host runtime passes valid pointer/length pairs for serialized data.
+            // The pointer is within WASM linear memory bounds and points to valid data.
             let slice = unsafe {
                 core::slice::from_raw_parts(config_ptr as *const u8, config_len as usize)
             };
@@ -288,6 +308,8 @@ macro_rules! register_challenge {
             if ptr.is_null() {
                 return $crate::pack_ptr_len(0, 0);
             }
+            // SAFETY: sdk_alloc returns a valid, aligned pointer with enough space for output.len()
+            // bytes, or null on allocation failure (handled above).
             unsafe {
                 core::ptr::copy_nonoverlapping(output.as_ptr(), ptr, output.len());
             }
@@ -296,6 +318,8 @@ macro_rules! register_challenge {
 
         #[no_mangle]
         pub extern "C" fn handle_route(req_ptr: i32, req_len: i32) -> i64 {
+            // SAFETY: The host runtime passes valid pointer/length pairs for serialized data.
+            // The pointer is within WASM linear memory bounds and points to valid data.
             let slice =
                 unsafe { core::slice::from_raw_parts(req_ptr as *const u8, req_len as usize) };
             let output = <$ty as $crate::Challenge>::handle_route(&_CHALLENGE, slice);
@@ -306,6 +330,8 @@ macro_rules! register_challenge {
             if ptr.is_null() {
                 return $crate::pack_ptr_len(0, 0);
             }
+            // SAFETY: sdk_alloc returns a valid, aligned pointer with enough space for output.len()
+            // bytes, or null on allocation failure (handled above).
             unsafe {
                 core::ptr::copy_nonoverlapping(output.as_ptr(), ptr, output.len());
             }
@@ -322,6 +348,8 @@ macro_rules! register_challenge {
             if ptr.is_null() {
                 return $crate::pack_ptr_len(0, 0);
             }
+            // SAFETY: sdk_alloc returns a valid, aligned pointer with enough space for output.len()
+            // bytes, or null on allocation failure (handled above).
             unsafe {
                 core::ptr::copy_nonoverlapping(output.as_ptr(), ptr, output.len());
             }
@@ -335,8 +363,12 @@ macro_rules! register_challenge {
             val_ptr: i32,
             val_len: i32,
         ) -> i32 {
+            // SAFETY: The host runtime passes valid pointer/length pairs for key and value data.
+            // Both pointers are within WASM linear memory bounds.
             let key =
                 unsafe { core::slice::from_raw_parts(key_ptr as *const u8, key_len as usize) };
+            // SAFETY: The host runtime passes valid pointer/length pairs for key and value data.
+            // Both pointers are within WASM linear memory bounds.
             let value =
                 unsafe { core::slice::from_raw_parts(val_ptr as *const u8, val_len as usize) };
             if <$ty as $crate::Challenge>::validate_storage_write(&_CHALLENGE, key, value) {
@@ -356,6 +388,8 @@ macro_rules! register_challenge {
             if ptr.is_null() {
                 return $crate::pack_ptr_len(0, 0);
             }
+            // SAFETY: sdk_alloc returns a valid, aligned pointer with enough space for output.len()
+            // bytes, or null on allocation failure (handled above).
             unsafe {
                 core::ptr::copy_nonoverlapping(output.as_ptr(), ptr, output.len());
             }
@@ -367,6 +401,8 @@ macro_rules! register_challenge {
             if input_ptr <= 0 || input_len <= 0 {
                 return $crate::pack_ptr_len(0, 0);
             }
+            // SAFETY: The host runtime passes valid pointer/length pairs for serialized data.
+            // Null/negative pointers are rejected above.
             let input =
                 unsafe { core::slice::from_raw_parts(input_ptr as *const u8, input_len as usize) };
             let output = <$ty as $crate::Challenge>::aggregate(&_CHALLENGE, input);
@@ -377,6 +413,8 @@ macro_rules! register_challenge {
             if ptr.is_null() {
                 return $crate::pack_ptr_len(0, 0);
             }
+            // SAFETY: sdk_alloc returns a valid, aligned pointer with enough space for output.len()
+            // bytes, or null on allocation failure (handled above).
             unsafe {
                 core::ptr::copy_nonoverlapping(output.as_ptr(), ptr, output.len());
             }

@@ -39,6 +39,10 @@ extern "C" {
 
 pub fn host_http_get(request: &[u8]) -> Result<Vec<u8>, i32> {
     let mut response_buf = vec![0u8; 10 * 1024 * 1024]; // 10MB for large API responses
+                                                        // SAFETY: FFI call to the WASM host. The host guarantees:
+                                                        // - request pointer and length are valid for reads
+                                                        // - response_buf pointer and length are valid for writes
+                                                        // - The host writes at most response_buf.len() bytes
     let status = unsafe {
         http_get(
             request.as_ptr() as i32,
@@ -56,6 +60,10 @@ pub fn host_http_get(request: &[u8]) -> Result<Vec<u8>, i32> {
 
 pub fn host_http_post(request: &[u8], body: &[u8]) -> Result<Vec<u8>, i32> {
     let mut response_buf = vec![0u8; RESPONSE_BUF_MEDIUM];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - request pointer and length are valid for reads
+    // - response_buf pointer and length are valid for writes
+    // - The host writes at most response_buf.len() bytes
     let status = unsafe {
         http_post(
             request.as_ptr() as i32,
@@ -74,6 +82,10 @@ pub fn host_http_post(request: &[u8], body: &[u8]) -> Result<Vec<u8>, i32> {
 
 pub fn host_dns_resolve(request: &[u8]) -> Result<Vec<u8>, i32> {
     let mut response_buf = vec![0u8; RESPONSE_BUF_SMALL];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - request pointer and length are valid for reads
+    // - response_buf pointer is valid for writes
+    // - The host writes at most response_buf.len() bytes
     let status = unsafe {
         dns_resolve(
             request.as_ptr() as i32,
@@ -90,6 +102,10 @@ pub fn host_dns_resolve(request: &[u8]) -> Result<Vec<u8>, i32> {
 
 pub fn host_storage_get(key: &[u8]) -> Result<Vec<u8>, i32> {
     let mut value_buf = vec![0u8; RESPONSE_BUF_MEDIUM];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - key pointer and length are valid for reads
+    // - value_buf pointer is valid for writes
+    // - The host writes at most value_buf.len() bytes
     let status = unsafe {
         storage_get(
             key.as_ptr() as i32,
@@ -105,6 +121,9 @@ pub fn host_storage_get(key: &[u8]) -> Result<Vec<u8>, i32> {
 }
 
 pub fn host_storage_set(key: &[u8], value: &[u8]) -> Result<(), i32> {
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - key pointer and length are valid for reads
+    // - value pointer and length are valid for reads
     let status = unsafe {
         storage_set(
             key.as_ptr() as i32,
@@ -121,6 +140,10 @@ pub fn host_storage_set(key: &[u8], value: &[u8]) -> Result<(), i32> {
 
 pub fn host_storage_get_cross(challenge_id: &[u8], key: &[u8]) -> Result<Vec<u8>, i32> {
     let mut value_buf = vec![0u8; RESPONSE_BUF_MEDIUM];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - challenge_id and key pointers/lengths are valid for reads
+    // - value_buf pointer is valid for writes
+    // - The host writes at most value_buf.len() bytes
     let status = unsafe {
         storage_get_cross(
             challenge_id.as_ptr() as i32,
@@ -140,6 +163,10 @@ pub fn host_storage_get_cross(challenge_id: &[u8], key: &[u8]) -> Result<Vec<u8>
 /// List all key-value pairs matching a prefix. Returns bincode-encoded Vec<(Vec<u8>, Vec<u8>)>.
 pub fn host_storage_list_prefix(prefix: &[u8], limit: i32) -> Result<Vec<u8>, i32> {
     let mut result_buf = vec![0u8; RESPONSE_BUF_LARGE];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - prefix pointer and length are valid for reads
+    // - result_buf pointer and length are valid for writes
+    // - The host writes at most result_buf.len() bytes
     let status = unsafe {
         storage_list_prefix(
             prefix.as_ptr() as i32,
@@ -157,6 +184,9 @@ pub fn host_storage_list_prefix(prefix: &[u8], limit: i32) -> Result<Vec<u8>, i3
 
 /// Count keys matching a prefix.
 pub fn host_storage_count_prefix(prefix: &[u8]) -> Result<u64, i32> {
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - prefix pointer and length are valid for reads
+    // - Returns a valid i64 count value
     let count = unsafe { storage_count_prefix(prefix.as_ptr() as i32, prefix.len() as i32) };
     if count < 0 {
         return Err(count as i32);
@@ -166,6 +196,10 @@ pub fn host_storage_count_prefix(prefix: &[u8]) -> Result<u64, i32> {
 
 pub fn host_terminal_exec(request: &[u8]) -> Result<Vec<u8>, i32> {
     let mut result_buf = vec![0u8; RESPONSE_BUF_LARGE];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - request pointer and length are valid for reads
+    // - result_buf pointer and length are valid for writes
+    // - The host writes at most result_buf.len() bytes
     let status = unsafe {
         terminal_exec(
             request.as_ptr() as i32,
@@ -183,6 +217,10 @@ pub fn host_terminal_exec(request: &[u8]) -> Result<Vec<u8>, i32> {
 
 pub fn host_read_file(path: &[u8]) -> Result<Vec<u8>, i32> {
     let mut buf = vec![0u8; RESPONSE_BUF_LARGE];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - path pointer and length are valid for reads
+    // - buf pointer and length are valid for writes
+    // - The host writes at most buf.len() bytes
     let status = unsafe {
         terminal_read_file(
             path.as_ptr() as i32,
@@ -199,6 +237,9 @@ pub fn host_read_file(path: &[u8]) -> Result<Vec<u8>, i32> {
 }
 
 pub fn host_write_file(path: &[u8], data: &[u8]) -> Result<(), i32> {
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - path pointer and length are valid for reads
+    // - data pointer and length are valid for reads
     let status = unsafe {
         terminal_write_file(
             path.as_ptr() as i32,
@@ -215,6 +256,10 @@ pub fn host_write_file(path: &[u8], data: &[u8]) -> Result<(), i32> {
 
 pub fn host_list_dir(path: &[u8]) -> Result<Vec<u8>, i32> {
     let mut buf = vec![0u8; RESPONSE_BUF_MEDIUM];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - path pointer and length are valid for reads
+    // - buf pointer and length are valid for writes
+    // - The host writes at most buf.len() bytes
     let status = unsafe {
         terminal_list_dir(
             path.as_ptr() as i32,
@@ -231,10 +276,15 @@ pub fn host_list_dir(path: &[u8]) -> Result<Vec<u8>, i32> {
 }
 
 pub fn host_get_time() -> i64 {
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - terminal_get_time returns a valid i64 timestamp
     unsafe { terminal_get_time() }
 }
 
 pub fn host_random_seed(buf: &mut [u8]) -> Result<(), i32> {
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - buf pointer and length are valid for writes
+    // - The host writes exactly buf.len() random bytes
     let status = unsafe { terminal_random_seed(buf.as_mut_ptr() as i32, buf.len() as i32) };
     if status < 0 {
         return Err(status);
@@ -252,6 +302,10 @@ extern "C" {
 
 pub fn host_sandbox_exec(request: &[u8]) -> Result<Vec<u8>, i32> {
     let mut response_buf = vec![0u8; RESPONSE_BUF_LARGE];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - request pointer and length are valid for reads
+    // - response_buf pointer and length are valid for writes
+    // - The host writes at most response_buf.len() bytes
     let status = unsafe {
         sandbox_exec(
             request.as_ptr() as i32,
@@ -268,15 +322,24 @@ pub fn host_sandbox_exec(request: &[u8]) -> Result<Vec<u8>, i32> {
 }
 
 pub fn host_get_timestamp() -> i64 {
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - get_timestamp returns a valid i64 timestamp
     unsafe { get_timestamp() }
 }
 
 pub fn host_log(level: u8, msg: &str) {
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - msg pointer and length are valid for reads
+    // - The function does not modify WASM memory
     unsafe { log_message(level as i32, msg.as_ptr() as i32, msg.len() as i32) }
 }
 
 pub fn host_env_get(key: &str) -> Option<Vec<u8>> {
     let mut buf = vec![0u8; 4096];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - key pointer and length are valid for reads
+    // - buf pointer and length are valid for writes
+    // - The host writes at most buf.len() bytes
     let status = unsafe {
         env_get(
             key.as_ptr() as i32,
@@ -300,6 +363,10 @@ extern "C" {
 
 pub fn host_llm_chat_completion(request: &[u8]) -> Result<Vec<u8>, i32> {
     let mut response_buf = vec![0u8; RESPONSE_BUF_LARGE];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - request pointer and length are valid for reads
+    // - response_buf pointer and length are valid for writes
+    // - The host writes at most response_buf.len() bytes
     let status = unsafe {
         llm_chat_completion(
             request.as_ptr() as i32,
@@ -316,6 +383,8 @@ pub fn host_llm_chat_completion(request: &[u8]) -> Result<Vec<u8>, i32> {
 }
 
 pub fn host_llm_is_available() -> bool {
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - llm_is_available returns a valid i32 (0 or 1)
     unsafe { llm_is_available() == 1 }
 }
 
@@ -334,11 +403,16 @@ extern "C" {
 }
 
 pub fn host_consensus_get_epoch() -> i64 {
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - consensus_get_epoch returns a valid i64 epoch number
     unsafe { consensus_get_epoch() }
 }
 
 pub fn host_consensus_get_validators() -> Result<Vec<u8>, i32> {
     let mut buf = vec![0u8; RESPONSE_BUF_MEDIUM];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - buf pointer and length are valid for writes
+    // - The host writes at most buf.len() bytes
     let status = unsafe { consensus_get_validators(buf.as_mut_ptr() as i32, buf.len() as i32) };
     if status < 0 {
         return Err(status);
@@ -348,6 +422,8 @@ pub fn host_consensus_get_validators() -> Result<Vec<u8>, i32> {
 }
 
 pub fn host_consensus_propose_weight(uid: i32, weight: i32) -> Result<(), i32> {
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - The function accepts valid i32 uid and weight values
     let status = unsafe { consensus_propose_weight(uid, weight) };
     if status < 0 {
         return Err(status);
@@ -357,6 +433,9 @@ pub fn host_consensus_propose_weight(uid: i32, weight: i32) -> Result<(), i32> {
 
 pub fn host_consensus_get_votes() -> Result<Vec<u8>, i32> {
     let mut buf = vec![0u8; RESPONSE_BUF_MEDIUM];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - buf pointer and length are valid for writes
+    // - The host writes at most buf.len() bytes
     let status = unsafe { consensus_get_votes(buf.as_mut_ptr() as i32, buf.len() as i32) };
     if status < 0 {
         return Err(status);
@@ -367,6 +446,8 @@ pub fn host_consensus_get_votes() -> Result<Vec<u8>, i32> {
 
 pub fn host_consensus_get_state_hash() -> Result<[u8; 32], i32> {
     let mut buf = [0u8; 32];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - buf pointer is valid for writes of exactly 32 bytes
     let status = unsafe { consensus_get_state_hash(buf.as_mut_ptr() as i32) };
     if status < 0 {
         return Err(status);
@@ -375,15 +456,22 @@ pub fn host_consensus_get_state_hash() -> Result<[u8; 32], i32> {
 }
 
 pub fn host_consensus_get_submission_count() -> i32 {
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - consensus_get_submission_count returns a valid i32 count
     unsafe { consensus_get_submission_count() }
 }
 
 pub fn host_consensus_get_block_height() -> i64 {
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - consensus_get_block_height returns a valid i64 block height
     unsafe { consensus_get_block_height() }
 }
 
 pub fn host_consensus_get_subnet_challenges() -> Result<Vec<u8>, i32> {
     let mut buf = vec![0u8; RESPONSE_BUF_MEDIUM];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - buf pointer and length are valid for writes
+    // - The host writes at most buf.len() bytes
     let status =
         unsafe { consensus_get_subnet_challenges(buf.as_mut_ptr() as i32, buf.len() as i32) };
     if status < 0 {
@@ -397,6 +485,9 @@ pub fn host_consensus_get_subnet_challenges() -> Result<Vec<u8>, i32> {
 /// Returns JSON-encoded list of hotkey strings.
 pub fn host_consensus_get_llm_validators() -> Result<Vec<u8>, i32> {
     let mut buf = vec![0u8; RESPONSE_BUF_MEDIUM];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - buf pointer and length are valid for writes
+    // - The host writes at most buf.len() bytes
     let status = unsafe { consensus_get_llm_validators(buf.as_mut_ptr() as i32, buf.len() as i32) };
     if status < 0 {
         return Err(status);
@@ -409,6 +500,9 @@ pub fn host_consensus_get_llm_validators() -> Result<Vec<u8>, i32> {
 /// Returns JSON-encoded list of hotkey strings.
 pub fn host_consensus_get_registered_hotkeys() -> Result<Vec<u8>, i32> {
     let mut buf = vec![0u8; RESPONSE_BUF_MEDIUM];
+    // SAFETY: FFI call to the WASM host. The host guarantees:
+    // - buf pointer and length are valid for writes
+    // - The host writes at most buf.len() bytes
     let status =
         unsafe { consensus_get_registered_hotkeys(buf.as_mut_ptr() as i32, buf.len() as i32) };
     if status < 0 {

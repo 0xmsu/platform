@@ -14,6 +14,10 @@ struct BumpAllocator {
     offset: UnsafeCell<usize>,
 }
 
+// SAFETY: BumpAllocator is Sync because:
+// - All access is through the alloc/reset methods which use interior mutability
+// - In WASM, there is no threading, so concurrent access is impossible
+// - The allocator is only used from single-threaded WASM code
 unsafe impl Sync for BumpAllocator {}
 
 impl BumpAllocator {
@@ -25,6 +29,9 @@ impl BumpAllocator {
     }
 
     fn alloc(&self, size: usize, align: usize) -> *mut u8 {
+        // SAFETY: We have exclusive access to the arena through UnsafeCell.
+        // In WASM there are no threads, so no concurrent access is possible.
+        // We check bounds before returning a pointer to prevent overflow.
         unsafe {
             let offset = &mut *self.offset.get();
             let aligned = (*offset + align - 1) & !(align - 1);
@@ -39,6 +46,8 @@ impl BumpAllocator {
     }
 
     fn reset(&self) {
+        // SAFETY: We have exclusive access to offset through UnsafeCell.
+        // In WASM there are no threads, so no concurrent access is possible.
         unsafe {
             *self.offset.get() = 0;
         }
