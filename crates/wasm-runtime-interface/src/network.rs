@@ -314,7 +314,7 @@ impl NetworkState {
         // `block_on` (trust-dns lookup, reqwest blocking send) which panics
         // when executed inside a tokio runtime.
         let dns_resolver = self.dns_resolver.clone();
-        let policy_ranges = self.policy.allowed_ip_ranges.clone();
+        let _policy_ranges = self.policy.allowed_ip_ranges.clone();
         let block_private = self.policy.dns_policy.block_private_ranges;
         let url_clone = request.url.clone();
 
@@ -500,61 +500,6 @@ impl NetworkState {
         self.policy
             .is_http_request_allowed(&request.url)
             .map_err(map_policy_error)
-    }
-
-    fn resolve_and_validate_ip(&self, url: &str) -> Result<Option<IpAddr>, NetworkError> {
-        let parsed = url::Url::parse(url)
-            .map_err(|err| NetworkError::PolicyViolation(format!("invalid url: {err}")))?;
-
-        let host_str = match parsed.host_str() {
-            Some(h) => h,
-            None => return Ok(None),
-        };
-
-        if let Ok(ip) = host_str.parse::<IpAddr>() {
-            self.validate_ip_against_policy(ip)?;
-            return Ok(Some(ip));
-        }
-
-        let resolver = Arc::clone(&self.dns_resolver);
-        let host = host_str.to_string();
-        let lookup = std::thread::spawn(move || resolver.lookup_ip(host.as_str()))
-            .join()
-            .map_err(|_| NetworkError::DnsFailure("DNS lookup thread panicked".to_string()))?
-            .map_err(|err| {
-                NetworkError::DnsFailure(format!("pre-connect resolve failed: {err}"))
-            })?;
-
-        let ips: Vec<IpAddr> = lookup.iter().collect();
-        for ip in &ips {
-            self.validate_ip_against_policy(*ip)?;
-        }
-
-        Ok(ips.into_iter().next())
-    }
-
-    fn validate_ip_against_policy(&self, ip: IpAddr) -> Result<(), NetworkError> {
-        if self.policy.dns_policy.block_private_ranges && is_private_ip(ip) {
-            self.audit_denial(&format!("blocked private/reserved IP: {ip}"));
-            return Err(NetworkError::PolicyViolation(format!(
-                "connection to private/reserved IP blocked: {ip}"
-            )));
-        }
-
-        if !self.policy.allowed_ip_ranges.is_empty()
-            && !self
-                .policy
-                .allowed_ip_ranges
-                .iter()
-                .any(|net| net.contains(&ip))
-        {
-            self.audit_denial(&format!("IP not in allowed ranges: {ip}"));
-            return Err(NetworkError::PolicyViolation(format!(
-                "IP not in allowed ranges: {ip}"
-            )));
-        }
-
-        Ok(())
     }
 
     fn ensure_header_limits(&self, headers: &HashMap<String, String>) -> Result<(), NetworkError> {
@@ -1326,53 +1271,6 @@ mod tests {
         assert_eq!(state.dns_lookups(), 0);
         assert!(state.request_timestamps.is_empty());
         assert!(state.dns_cache.is_empty());
-    }
-
-    #[test]
-    fn test_validate_ip_against_policy_private_blocked() {
-        let mut policy = test_policy_strict(vec!["example.com".to_string()]);
-        policy.dns_policy.block_private_ranges = true;
-        let state = NetworkState::new(policy, None, "test".into(), "test".into()).unwrap();
-
-        let loopback = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
-        let err = state.validate_ip_against_policy(loopback).unwrap_err();
-        assert!(matches!(err, NetworkError::PolicyViolation(_)));
-    }
-
-    #[test]
-    fn test_validate_ip_against_policy_public_allowed() {
-        let mut policy = test_policy_strict(vec!["example.com".to_string()]);
-        policy.dns_policy.block_private_ranges = true;
-        let state = NetworkState::new(policy, None, "test".into(), "test".into()).unwrap();
-
-        let public = IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8));
-        assert!(state.validate_ip_against_policy(public).is_ok());
-    }
-
-    #[test]
-    fn test_validate_ip_against_policy_ip_range_filter() {
-        let mut policy = test_policy_strict(vec!["example.com".to_string()]);
-        policy.dns_policy.block_private_ranges = false;
-        policy.allowed_ip_ranges = vec!["8.8.0.0/16".to_string()];
-        let state = NetworkState::new(policy, None, "test".into(), "test".into()).unwrap();
-
-        let allowed = IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8));
-        assert!(state.validate_ip_against_policy(allowed).is_ok());
-
-        let denied = IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1));
-        let err = state.validate_ip_against_policy(denied).unwrap_err();
-        assert!(matches!(err, NetworkError::PolicyViolation(_)));
-    }
-
-    #[test]
-    fn test_validate_ip_against_policy_empty_ranges_no_block() {
-        let mut policy = test_policy_strict(vec!["example.com".to_string()]);
-        policy.dns_policy.block_private_ranges = false;
-        policy.allowed_ip_ranges = vec![];
-        let state = NetworkState::new(policy, None, "test".into(), "test".into()).unwrap();
-
-        let any_ip = IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8));
-        assert!(state.validate_ip_against_policy(any_ip).is_ok());
     }
 
     #[test]

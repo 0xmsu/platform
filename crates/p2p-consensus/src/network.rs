@@ -224,7 +224,6 @@ pub struct P2PNetwork {
     /// Reference to validator set
     validator_set: Arc<ValidatorSet>,
     /// Event sender
-    #[allow(dead_code)]
     event_tx: mpsc::Sender<NetworkEvent>,
     /// Message nonce counter
     nonce: RwLock<u64>,

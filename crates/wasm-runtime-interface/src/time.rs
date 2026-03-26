@@ -59,10 +59,11 @@ impl TimePolicy {
     }
 }
 
-#[allow(dead_code)]
 pub struct TimeState {
     policy: TimePolicy,
+    #[allow(dead_code)]
     challenge_id: String,
+    #[allow(dead_code)]
     validator_id: String,
 }
 

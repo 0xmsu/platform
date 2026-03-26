@@ -628,35 +628,6 @@ struct OpenAiUsage {
     total_tokens: Option<u32>,
 }
 
-#[derive(Serialize)]
-struct SdkResponse {
-    content: Option<String>,
-    tool_calls: Vec<SdkResponseToolCall>,
-    usage: Option<SdkUsage>,
-    finish_reason: Option<String>,
-}
-
-#[derive(Serialize)]
-struct SdkResponseToolCall {
-    id: String,
-    #[serde(rename = "type")]
-    call_type: String,
-    function: SdkResponseFunctionCall,
-}
-
-#[derive(Serialize)]
-struct SdkResponseFunctionCall {
-    name: String,
-    arguments: String,
-}
-
-#[derive(Serialize)]
-struct SdkUsage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    total_tokens: u32,
-}
-
 fn parse_openai_to_sdk_response(
     body: &[u8],
 ) -> Result<platform_challenge_sdk_wasm::LlmResponse, String> {
@@ -713,61 +684,6 @@ fn parse_openai_to_sdk_response(
     });
 
     Ok(LlmResponse {
-        content,
-        tool_calls,
-        usage,
-        finish_reason,
-    })
-}
-
-fn parse_openai_response(body: &[u8]) -> Result<SdkResponse, String> {
-    let resp: OpenAiResponse =
-        serde_json::from_slice(body).map_err(|e| format!("JSON parse error: {e}"))?;
-
-    let choice = resp.choices.and_then(|mut c| {
-        if c.is_empty() {
-            None
-        } else {
-            Some(c.remove(0))
-        }
-    });
-
-    let (content, tool_calls_raw, finish_reason) = match choice {
-        Some(c) => {
-            let fr = c.finish_reason;
-            match c.message {
-                Some(msg) => {
-                    let content = msg.content.or(msg.reasoning_content);
-                    (content, msg.tool_calls.unwrap_or_default(), fr)
-                }
-                None => (None, Vec::new(), fr),
-            }
-        }
-        None => (None, Vec::new(), None),
-    };
-
-    let tool_calls = tool_calls_raw
-        .into_iter()
-        .filter_map(|tc| {
-            let func = tc.function?;
-            Some(SdkResponseToolCall {
-                id: tc.id.unwrap_or_default(),
-                call_type: tc.call_type.unwrap_or_else(|| "function".to_string()),
-                function: SdkResponseFunctionCall {
-                    name: func.name.unwrap_or_default(),
-                    arguments: func.arguments.unwrap_or_default(),
-                },
-            })
-        })
-        .collect();
-
-    let usage = resp.usage.map(|u| SdkUsage {
-        prompt_tokens: u.prompt_tokens.unwrap_or(0),
-        completion_tokens: u.completion_tokens.unwrap_or(0),
-        total_tokens: u.total_tokens.unwrap_or(0),
-    });
-
-    Ok(SdkResponse {
         content,
         tool_calls,
         usage,
@@ -878,43 +794,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_openai_response_with_tool_calls() {
-        let response_json = serde_json::json!({
-            "id": "chatcmpl-123",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{
-                        "id": "call_abc123",
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": "{\"location\": \"Paris\"}"
-                        }
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }],
-            "usage": {
-                "prompt_tokens": 50,
-                "completion_tokens": 20,
-                "total_tokens": 70
-            }
-        });
-
-        let body = serde_json::to_vec(&response_json).unwrap();
-        let sdk_resp = parse_openai_response(&body).unwrap();
-
-        assert!(sdk_resp.content.is_none());
-        assert_eq!(sdk_resp.tool_calls.len(), 1);
-        assert_eq!(sdk_resp.tool_calls[0].id, "call_abc123");
-        assert_eq!(sdk_resp.tool_calls[0].function.name, "get_weather");
-        assert_eq!(sdk_resp.finish_reason, Some("tool_calls".to_string()));
-        assert_eq!(sdk_resp.usage.unwrap().total_tokens, 70);
-    }
-
-    #[test]
     fn test_bincode_roundtrip_llm_request() {
         use platform_challenge_sdk_wasm::{LlmMessage, LlmRequest};
         let req = LlmRequest::simple(
@@ -934,30 +813,5 @@ mod tests {
         let decoded: LlmRequest = bincode::deserialize(&bytes).unwrap();
         assert_eq!(decoded.model, "moonshotai/Kimi-K2.5-TEE");
         assert_eq!(decoded.messages.len(), 2);
-    }
-
-    #[test]
-    fn test_parse_openai_response_text_only() {
-        let response_json = serde_json::json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "Hello, world!"
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
-                "total_tokens": 15
-            }
-        });
-
-        let body = serde_json::to_vec(&response_json).unwrap();
-        let sdk_resp = parse_openai_response(&body).unwrap();
-
-        assert_eq!(sdk_resp.content, Some("Hello, world!".to_string()));
-        assert!(sdk_resp.tool_calls.is_empty());
-        assert_eq!(sdk_resp.finish_reason, Some("stop".to_string()));
     }
 }

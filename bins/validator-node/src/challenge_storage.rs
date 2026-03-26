@@ -23,7 +23,6 @@ pub struct ChallengeStorageBackend {
     keypair: Option<Keypair>,
     /// Write-through cache for read-your-own-writes during a sync cycle.
     /// Key: (challenge_id, hex-encoded key). Value: pending data (None = delete).
-    /// Cleared via `clear_pending_writes()` after each sync cycle completes.
     pending_writes: parking_lot::RwLock<HashMap<(String, String), PendingValue>>,
 }
 
@@ -52,20 +51,6 @@ impl ChallengeStorageBackend {
             keypair: Some(keypair),
             pending_writes: parking_lot::RwLock::new(HashMap::new()),
         }
-    }
-
-    /// Clear the pending writes cache. Call after each sync cycle completes
-    /// so that subsequent reads go through consensus-confirmed storage.
-    pub fn clear_pending_writes(&self) {
-        self.pending_writes.write().clear();
-    }
-
-    /// Clear pending writes for a specific challenge only, leaving other
-    /// challenges' caches intact to avoid race conditions.
-    pub fn clear_pending_writes_for_challenge(&self, challenge_id: &str) {
-        self.pending_writes
-            .write()
-            .retain(|(cid, _), _| cid != challenge_id);
     }
 }
 
@@ -109,7 +94,6 @@ impl StorageBackend for ChallengeStorageBackend {
         // Cache the write locally so WASM can read-its-own-writes during the
         // current sync cycle. This cache is NOT persisted to storage and does NOT
         // affect other validators. Actual storage write happens after P2P consensus.
-        // The cache is cleared after each sync cycle via clear_pending_writes().
         {
             let cache_key = (challenge_id.to_string(), hex::encode(key));
             let cache_value = if value.is_empty() {
@@ -122,7 +106,7 @@ impl StorageBackend for ChallengeStorageBackend {
 
         // Broadcast via P2P for consensus
         if let (Some(tx), Some(kp)) = (&self.p2p_tx, &self.keypair) {
-            let challenge_uuid = uuid::Uuid::parse_str(challenge_id).unwrap_or_else(|_| {
+            let _challenge_uuid = uuid::Uuid::parse_str(challenge_id).unwrap_or_else(|_| {
                 // Derive a deterministic UUID from the challenge_id string
                 let mut id_hash = [0u8; 16];
                 let full_hash = <Sha256 as Digest>::digest(challenge_id.as_bytes());

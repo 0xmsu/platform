@@ -41,10 +41,6 @@ pub enum ChallengeError {
     #[error("Serialization error: {0}")]
     Serialization(String),
 
-    #[error("Configuration error: {0}")]
-    #[deprecated(note = "Use Config variant instead")]
-    Configuration(String),
-
     #[error("Unsupported job type: {0}")]
     UnsupportedJobType(String),
 

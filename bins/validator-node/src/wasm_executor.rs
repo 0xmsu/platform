@@ -3,7 +3,7 @@ use parking_lot::{Mutex, RwLock};
 use platform_challenge_sdk_wasm::{DedupFlags, EvaluationInput, EvaluationOutput, WeightEntry};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -17,7 +17,6 @@ const MAX_EVALUATION_OUTPUT_SIZE: usize = 64 * 1024 * 1024;
 const MAX_ROUTE_OUTPUT_SIZE: u64 = 16 * 1024 * 1024;
 const MAX_TASK_OUTPUT_SIZE: u64 = 16 * 1024 * 1024;
 
-#[allow(dead_code)]
 pub struct WasmExecutorConfig {
     pub module_dir: PathBuf,
     pub max_memory_bytes: u64,
@@ -134,6 +133,7 @@ impl Drop for DedupGuard<'_> {
 struct PersistentInstance {
     instance: ChallengeInstance,
     module_version: u64,
+    #[allow(dead_code)]
     created_at: Instant,
 }
 
@@ -885,7 +885,6 @@ impl WasmChallengeExecutor {
         Ok((result_data, metrics))
     }
 
-    #[allow(dead_code)]
     pub fn execute_handle_route(
         &self,
         module_path: &str,
@@ -1603,7 +1602,6 @@ impl WasmChallengeExecutor {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn invalidate_cache(&self, module_path: &str) {
         let mut cache = self.module_cache.write();
         if cache.remove(module_path).is_some() {
