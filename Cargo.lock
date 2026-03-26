@@ -4403,35 +4403,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mock-subtensor"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "bincode",
- "bs58",
- "chrono",
- "clap",
- "futures",
- "hex",
- "parking_lot 0.12.5",
- "platform-bittensor",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.17",
- "tokio",
- "tokio-tungstenite",
- "tower 0.4.13",
- "tower-http 0.6.8",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "multi-stash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5221,7 +5192,6 @@ dependencies = [
  "reqwest 0.11.27",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "sp-core",
  "thiserror 2.0.17",
  "tokio",
@@ -8343,7 +8313,6 @@ dependencies = [
  "tower 0.5.2",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]

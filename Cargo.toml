@@ -15,7 +15,6 @@ members = [
     "crates/challenge-sdk-wasm",
     "bins/validator-node",
     "bins/utils",
-    "bins/mock-subtensor",
     "bins/platform-cli",
     "bins/platform-sudo",
     "tests",
