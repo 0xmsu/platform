@@ -25,7 +25,7 @@ const GITHUB_API_BASE: &str = "https://api.github.com";
 struct PlatformConfig {
     network: NetworkConfig,
     #[serde(default)]
-    challenges: HashMap<String, ChallengeConfig>,
+    challenges: HashMap<String, CliToolConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,7 +35,7 @@ struct NetworkConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChallengeConfig {
+struct CliToolConfig {
     github_repo: String,
     binary_name: String,
     command_alias: String,
@@ -52,7 +52,7 @@ impl Default for PlatformConfig {
         let mut challenges = HashMap::new();
         challenges.insert(
             "bounty-challenge".to_string(),
-            ChallengeConfig {
+            CliToolConfig {
                 github_repo: "PlatformNetwork/bounty-challenge".to_string(),
                 binary_name: "bounty-cli".to_string(),
                 command_alias: "bounty".to_string(),
@@ -61,7 +61,7 @@ impl Default for PlatformConfig {
         );
         challenges.insert(
             "term-challenge".to_string(),
-            ChallengeConfig {
+            CliToolConfig {
                 github_repo: "PlatformNetwork/term-challenge".to_string(),
                 binary_name: "term-cli".to_string(),
                 command_alias: "term".to_string(),
@@ -556,7 +556,7 @@ fn print_path_instructions_unix(bin_str: &str) {
 fn resolve_challenge_name(
     config: &PlatformConfig,
     name: &str,
-) -> Option<(String, ChallengeConfig)> {
+) -> Option<(String, CliToolConfig)> {
     if let Some(challenge) = config.challenges.get(name) {
         return Some((name.to_string(), challenge.clone()));
     }

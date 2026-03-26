@@ -2,7 +2,7 @@
 //!
 //! Allows updating challenges and configuration without restarting validators.
 
-use crate::{ChallengeConfig, SubnetConfig};
+use crate::{ChallengeDeploymentConfig, SubnetConfig};
 use parking_lot::RwLock;
 use platform_core::{ChallengeId, Hotkey};
 use serde::{Deserialize, Serialize};
@@ -87,7 +87,7 @@ pub enum UpdatePayload {
     WasmChallenge {
         wasm_bytes: Vec<u8>,
         wasm_hash: String,
-        config: ChallengeConfig,
+        config: ChallengeDeploymentConfig,
     },
     /// Configuration update
     Config(SubnetConfig),
@@ -533,7 +533,7 @@ mod tests {
         let wasm_hash = UpdateManager::compute_hash(&wasm_bytes);
         let challenge_id = ChallengeId(uuid::Uuid::new_v4().to_string());
 
-        let config = ChallengeConfig {
+        let config = ChallengeDeploymentConfig {
             id: challenge_id.0.to_string(),
             name: "Test Challenge".into(),
             wasm_hash: wasm_hash.clone(),
@@ -686,7 +686,7 @@ mod tests {
         let wasm_payload = UpdatePayload::WasmChallenge {
             wasm_bytes: vec![0u8; 10],
             wasm_hash: "hash".into(),
-            config: ChallengeConfig {
+            config: ChallengeDeploymentConfig {
                 id: "test".into(),
                 name: "Test".into(),
                 wasm_hash: "hash".into(),
@@ -797,7 +797,7 @@ mod tests {
         let manager = UpdateManager::new(dir.path().to_path_buf());
 
         let challenge_id = ChallengeId(uuid::Uuid::new_v4().to_string());
-        let config = ChallengeConfig {
+        let config = ChallengeDeploymentConfig {
             id: challenge_id.0.to_string(),
             name: "Test".into(),
             wasm_hash: "hash".into(),
@@ -915,7 +915,7 @@ mod tests {
         let bad_hash = "not_the_real_hash".to_string();
         let wasm_bytes = vec![1u8, 2, 3];
 
-        let config = ChallengeConfig {
+        let config = ChallengeDeploymentConfig {
             id: challenge_id.0.to_string(),
             name: "Rollback Challenge".into(),
             wasm_hash: bad_hash.clone(),
@@ -970,7 +970,7 @@ mod tests {
         let wasm_bytes = vec![0u8, 1, 2];
         let bad_hash = "incorrect".to_string();
 
-        let config = ChallengeConfig {
+        let config = ChallengeDeploymentConfig {
             id: challenge_id.0.to_string(),
             name: "RollbackFail".into(),
             wasm_hash: bad_hash.clone(),
@@ -1013,7 +1013,7 @@ mod tests {
         let wasm_bytes = vec![9u8, 8, 7, 6];
         let wasm_hash = UpdateManager::compute_hash(&wasm_bytes);
 
-        let config = ChallengeConfig {
+        let config = ChallengeDeploymentConfig {
             id: challenge_id.0.to_string(),
             name: "ApplySuccess".into(),
             wasm_hash: wasm_hash.clone(),
@@ -1060,7 +1060,7 @@ mod tests {
         let challenge_id = ChallengeId(uuid::Uuid::new_v4().to_string());
         let wasm_bytes = vec![1u8, 2, 3];
 
-        let config = ChallengeConfig {
+        let config = ChallengeDeploymentConfig {
             id: challenge_id.0.to_string(),
             name: "ApplyFail".into(),
             wasm_hash: "expected_hash".into(),

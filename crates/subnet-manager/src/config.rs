@@ -146,9 +146,12 @@ impl Default for HealthConfig {
     }
 }
 
-/// Challenge configuration
+/// Challenge deployment configuration
+///
+/// Contains settings for deploying and running a challenge WASM module,
+/// distinct from the challenge's runtime evaluation configuration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChallengeConfig {
+pub struct ChallengeDeploymentConfig {
     /// Challenge ID
     pub id: String,
 
@@ -173,6 +176,10 @@ pub struct ChallengeConfig {
     /// Maximum concurrent evaluations
     pub max_concurrent: u32,
 }
+
+/// Deprecated: Use `ChallengeDeploymentConfig` instead.
+#[deprecated(since = "0.1.0", note = "Use `ChallengeDeploymentConfig` instead")]
+pub type ChallengeConfig = ChallengeDeploymentConfig;
 
 impl SubnetConfig {
     /// Load from file

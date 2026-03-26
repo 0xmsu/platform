@@ -198,9 +198,9 @@ pub struct ValidatorEvaluation {
     pub signature: Vec<u8>,
 }
 
-/// Challenge configuration stored in state
+/// Challenge record stored in state
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChallengeConfig {
+pub struct ChallengeRecord {
     /// Challenge ID
     pub id: ChallengeId,
     /// Challenge name
@@ -217,6 +217,10 @@ pub struct ChallengeConfig {
     #[serde(default)]
     pub wasm_hash: [u8; 32],
 }
+
+/// Deprecated alias for ChallengeRecord
+#[deprecated(since = "0.2.0", note = "Use ChallengeRecord instead")]
+pub type ChallengeConfig = ChallengeRecord;
 
 /// Weight votes for epoch finalization
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -289,7 +293,7 @@ pub struct ChainState {
     #[serde(default, with = "hotkey_map_serde")]
     pub validators: HashMap<Hotkey, u64>,
     /// Active challenges
-    pub challenges: HashMap<ChallengeId, ChallengeConfig>,
+    pub challenges: HashMap<ChallengeId, ChallengeRecord>,
     /// Pending evaluations (submission_id -> record)
     pub pending_evaluations: HashMap<String, EvaluationRecord>,
     /// Completed evaluations (by epoch)
@@ -609,14 +613,14 @@ impl ChainState {
     }
 
     /// Add a challenge
-    pub fn add_challenge(&mut self, config: ChallengeConfig) {
-        info!(challenge_id = %config.id, name = %config.name, "Adding challenge to state");
-        self.challenges.insert(config.id.clone(), config);
+    pub fn add_challenge(&mut self, record: ChallengeRecord) {
+        info!(challenge_id = %record.id, name = %record.name, "Adding challenge to state");
+        self.challenges.insert(record.id.clone(), record);
         self.increment_sequence();
     }
 
     /// Remove a challenge
-    pub fn remove_challenge(&mut self, id: &ChallengeId) -> Option<ChallengeConfig> {
+    pub fn remove_challenge(&mut self, id: &ChallengeId) -> Option<ChallengeRecord> {
         let removed = self.challenges.remove(id);
         if removed.is_some() {
             self.increment_sequence();
@@ -625,14 +629,14 @@ impl ChainState {
     }
 
     /// Get a challenge by ID
-    pub fn get_challenge(&self, id: &ChallengeId) -> Option<&ChallengeConfig> {
+    pub fn get_challenge(&self, id: &ChallengeId) -> Option<&ChallengeRecord> {
         self.challenges.get(id)
     }
 
     /// Set challenge active status
     pub fn set_challenge_active(&mut self, id: &ChallengeId, active: bool) {
-        if let Some(config) = self.challenges.get_mut(id) {
-            config.is_active = active;
+        if let Some(record) = self.challenges.get_mut(id) {
+            record.is_active = active;
             self.increment_sequence();
         }
     }
@@ -649,9 +653,9 @@ impl ChainState {
         }
 
         // Update challenge name
-        if let Some(config) = self.challenges.get_mut(id) {
-            info!(challenge_id = %id, old_name = %config.name, new_name = %new_name, "Renaming challenge");
-            config.name = new_name;
+        if let Some(record) = self.challenges.get_mut(id) {
+            info!(challenge_id = %id, old_name = %record.name, new_name = %new_name, "Renaming challenge");
+            record.name = new_name;
             self.increment_sequence();
             return true;
         }
@@ -1840,7 +1844,7 @@ mod tests {
     #[test]
     fn test_challenge_management() {
         let mut state = ChainState::new(100);
-        let config = ChallengeConfig {
+        let record = ChallengeRecord {
             id: ChallengeId::new("test-challenge"),
             name: "Test Challenge".to_string(),
             weight: 50,
@@ -1850,8 +1854,8 @@ mod tests {
             wasm_hash: [0u8; 32],
         };
 
-        let id = config.id.clone();
-        state.add_challenge(config);
+        let id = record.id.clone();
+        state.add_challenge(record);
         assert!(state.challenges.contains_key(&id));
 
         state.remove_challenge(&id);

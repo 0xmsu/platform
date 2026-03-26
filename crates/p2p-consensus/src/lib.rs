@@ -62,10 +62,13 @@ pub use network::{
     P2PCommand, P2PEvent, P2PNetwork, PeerMapping,
 };
 pub use state::{
-    build_merkle_proof, compute_merkle_root, verify_merkle_proof, ChainState, ChallengeConfig,
+    build_merkle_proof, compute_merkle_root, verify_merkle_proof, ChainState, ChallengeRecord,
     EvaluationRecord, JobRecord, JobStatus, LeaderboardEntry, StateError, StateManager,
     StateMutationEntry, StorageProposal, TaskProgressRecord, ValidatorEvaluation, WeightVotes,
 };
+/// Deprecated alias - use ChallengeRecord instead
+#[deprecated(since = "0.2.0", note = "Use ChallengeRecord instead")]
+pub type ChallengeConfig = ChallengeRecord;
 pub use validator::{
     LeaderElection, StakeWeightedVoting, ValidatorError, ValidatorRecord, ValidatorSet,
 };

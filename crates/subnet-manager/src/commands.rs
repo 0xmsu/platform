@@ -3,7 +3,7 @@
 //! Commands that can be executed by the subnet owner.
 
 use crate::{
-    BanList, ChallengeConfig, HealthMetrics, HealthMonitor, RecoveryAction, RecoveryManager,
+    BanList, ChallengeDeploymentConfig, HealthMetrics, HealthMonitor, RecoveryAction, RecoveryManager,
     SnapshotManager, SubnetConfig, UpdateManager, UpdatePayload, UpdateTarget,
 };
 use parking_lot::RwLock;
@@ -19,13 +19,13 @@ pub enum SubnetCommand {
     // === Challenge Management ===
     /// Deploy a new challenge
     DeployChallenge {
-        config: ChallengeConfig,
+        config: ChallengeDeploymentConfig,
         wasm_bytes: Vec<u8>,
     },
     /// Update an existing challenge
     UpdateChallenge {
         challenge_id: String,
-        config: Option<ChallengeConfig>,
+        config: Option<ChallengeDeploymentConfig>,
         wasm_bytes: Option<Vec<u8>>,
     },
     /// Remove a challenge
@@ -242,7 +242,7 @@ impl CommandExecutor {
 
                 if let Some(wasm) = wasm_bytes {
                     let hash = sha256_hex(wasm);
-                    let cfg = config.clone().unwrap_or_else(|| ChallengeConfig {
+                    let cfg = config.clone().unwrap_or_else(|| ChallengeDeploymentConfig {
                         id: challenge_id.clone(),
                         name: challenge_id.clone(),
                         wasm_hash: hash.clone(),
@@ -1038,7 +1038,7 @@ mod tests {
     async fn test_deploy_challenge_command() {
         let (executor, _dir) = create_test_executor();
 
-        let config = ChallengeConfig {
+        let config = ChallengeDeploymentConfig {
             id: "test-challenge".into(),
             name: "Test Challenge".into(),
             wasm_hash: "hash".into(),
@@ -1062,7 +1062,7 @@ mod tests {
         let (executor, _dir) = create_test_executor();
 
         // Deploy a challenge first
-        let config = ChallengeConfig {
+        let config = ChallengeDeploymentConfig {
             id: "pause-test".into(),
             name: "Pause Test".into(),
             wasm_hash: "hash".into(),
@@ -1102,7 +1102,7 @@ mod tests {
         let (executor, _dir) = create_test_executor();
 
         // Deploy a challenge first
-        let config = ChallengeConfig {
+        let config = ChallengeDeploymentConfig {
             id: "update-test".into(),
             name: "Update Test".into(),
             wasm_hash: "hash".into(),
@@ -1136,7 +1136,7 @@ mod tests {
         let (executor, _dir) = create_test_executor();
 
         // Deploy a challenge first
-        let config = ChallengeConfig {
+        let config = ChallengeDeploymentConfig {
             id: "remove-test".into(),
             name: "Remove Test".into(),
             wasm_hash: "hash".into(),
@@ -1399,7 +1399,7 @@ mod tests {
         // Test serialization of all command variants
         let commands = vec![
             SubnetCommand::DeployChallenge {
-                config: ChallengeConfig {
+                config: ChallengeDeploymentConfig {
                     id: "test".into(),
                     name: "Test".into(),
                     wasm_hash: "hash".into(),
@@ -1508,7 +1508,7 @@ mod tests {
         let (executor, _dir) = create_test_executor();
 
         for i in 0..3 {
-            let config = ChallengeConfig {
+            let config = ChallengeDeploymentConfig {
                 id: format!("challenge{}", i),
                 name: format!("Challenge {}", i),
                 wasm_hash: format!("hash{}", i),
@@ -1539,7 +1539,7 @@ mod tests {
     async fn test_update_challenge_wasm_only() {
         let (executor, _dir) = create_test_executor();
 
-        let config = ChallengeConfig {
+        let config = ChallengeDeploymentConfig {
             id: "wasm_update_test".into(),
             name: "WASM Update Test".into(),
             wasm_hash: "hash1".into(),
@@ -1572,7 +1572,7 @@ mod tests {
     async fn test_update_challenge_config_only() {
         let (executor, _dir) = create_test_executor();
 
-        let config = ChallengeConfig {
+        let config = ChallengeDeploymentConfig {
             id: "config_update_test".into(),
             name: "Config Update Test".into(),
             wasm_hash: "hash1".into(),
@@ -1591,7 +1591,7 @@ mod tests {
             .await;
 
         // Update only config
-        let updated_config = ChallengeConfig {
+        let updated_config = ChallengeDeploymentConfig {
             emission_weight: 2.0,
             ..config
         };
