@@ -16,7 +16,7 @@ use platform_core::{ChainState, ChallengeId, Hotkey, SUDO_KEY_BYTES};
 use platform_distributed_storage::store::{DistributedStore, GetOptions, PutOptions, StorageKey};
 use platform_subnet_manager::BanList;
 use serde_json::Value;
-use sp_core::Pair;
+use sp_core::{ByteArray, Pair};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -1489,8 +1489,8 @@ async fn sudo_storage_handler(
         }
     };
     let signature = match sp_core::sr25519::Signature::from_slice(&sig_bytes) {
-        Some(s) => s,
-        None => {
+        Ok(s) => s,
+        Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "success": false, "message": "Invalid signature" })),

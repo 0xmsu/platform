@@ -25,7 +25,7 @@ serde_json = { workspace = true }
 bincode = { workspace = true }
 
 # Crypto
-sp-core = { version = "31.0", default-features = false, features = ["std"] }
+sp-core = { workspace = true }
 hex = { workspace = true }
 base64 = "0.22"
 
