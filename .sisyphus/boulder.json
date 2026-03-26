@@ -15,7 +15,14 @@
     "ses_2d3a17be0ffejOD8rm0TQYXvet",
     "ses_2d3a0f69dffenlquDhNNYLNrgW",
     "ses_2d39da16cffeRiGX7rHyQZ1FUT",
-    "ses_2d39d984bffePliVNjz3kvxYDn"
+    "ses_2d39d984bffePliVNjz3kvxYDn",
+    "ses_2d39c7ac4ffekb5UQdnTSpKRZ0",
+    "ses_2d399e777ffedwLd4iXYP426WY",
+    "ses_2d399edd8ffeaVK6IIXWDp5RKC",
+    "ses_2d399dcedffeIh643M3SkpJlvh",
+    "ses_2d399c4f4ffeYp1ikvWpdzgbr8",
+    "ses_2d396f993ffe3QuUi7U5lIctCW",
+    "ses_2d3936895ffe7WyqxJt7aJXLHR"
   ],
   "plan_name": "project-cleanup",
   "agent": "atlas",
@@ -46,6 +53,24 @@
       "agent": "Sisyphus-Junior",
       "category": "quick",
       "updated_at": "2026-03-26T23:02:41.041Z"
+    },
+    "todo:19": {
+      "task_key": "todo:19",
+      "task_label": "19",
+      "task_title": "Add SAFETY comments to all unsafe blocks",
+      "session_id": "ses_2d39c7ac4ffekb5UQdnTSpKRZ0",
+      "agent": "Sisyphus-Junior",
+      "category": "unspecified-high",
+      "updated_at": "2026-03-26T23:06:00.206Z"
+    },
+    "final-wave:f2": {
+      "task_key": "final-wave:f2",
+      "task_label": "F2",
+      "task_title": "**Code Quality Review** — `unspecified-high`",
+      "session_id": "ses_2d3936895ffe7WyqxJt7aJXLHR",
+      "agent": "Sisyphus-Junior",
+      "category": "quick",
+      "updated_at": "2026-03-26T23:13:49.705Z"
     }
   }
 }

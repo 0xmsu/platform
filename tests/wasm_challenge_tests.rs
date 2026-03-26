@@ -66,6 +66,8 @@ fn test_wasm_module_compiles() {
     );
 }
 
+// Requires term-challenge WASM from external repo
+#[ignore]
 #[test]
 fn test_wasm_module_instantiates() {
     let config = RuntimeConfig::default();
@@ -90,6 +92,8 @@ fn test_wasm_module_instantiates() {
     );
 }
 
+// Requires term-challenge WASM from external repo
+#[ignore]
 #[test]
 fn test_wasm_module_has_expected_exports() {
     let config = RuntimeConfig::default();
@@ -126,7 +130,7 @@ fn test_sudo_add_challenge_with_wasm() {
     assert_eq!(state.challenges.len(), 0);
 
     let challenge = create_test_challenge(&sudo, TERM_CHALLENGE_WASM.to_vec());
-    let challenge_id = challenge.id;
+    let challenge_id = challenge.id.clone();
 
     state.add_challenge(challenge);
 
@@ -144,7 +148,7 @@ fn test_sudo_remove_challenge() {
     let mut state = create_state_with_validators(&sudo, &validators);
 
     let challenge = create_test_challenge(&sudo, TERM_CHALLENGE_WASM.to_vec());
-    let challenge_id = challenge.id;
+    let challenge_id = challenge.id.clone();
     state.add_challenge(challenge);
 
     assert_eq!(state.challenges.len(), 1);
@@ -189,7 +193,7 @@ fn test_challenge_persistence_in_storage() {
     let mut state = create_state_with_validators(&sudo, &validators);
 
     let challenge = create_test_challenge(&sudo, TERM_CHALLENGE_WASM.to_vec());
-    let challenge_id = challenge.id;
+    let challenge_id = challenge.id.clone();
 
     state.add_challenge(challenge.clone());
     storage.save_challenge(&challenge).unwrap();
@@ -213,7 +217,7 @@ fn test_challenge_state_hash_changes() {
     let hash_before = state.state_hash;
 
     let challenge = create_test_challenge(&sudo, TERM_CHALLENGE_WASM.to_vec());
-    let challenge_id = challenge.id;
+    let challenge_id = challenge.id.clone();
     state.add_challenge(challenge);
 
     let hash_after_add = state.state_hash;
@@ -237,7 +241,7 @@ fn test_challenge_deletion_from_storage() {
 
     let (sudo, _validators) = create_five_validators();
     let challenge = create_test_challenge(&sudo, TERM_CHALLENGE_WASM.to_vec());
-    let challenge_id = challenge.id;
+    let challenge_id = challenge.id.clone();
 
     storage.save_challenge(&challenge).unwrap();
     assert!(storage.load_challenge(&challenge_id).unwrap().is_some());
@@ -316,12 +320,13 @@ fn test_consensus_state_manager_with_challenges() {
 
     let challenge_id = ChallengeId::new("test-challenge");
     let config = ConsensusChallengeConfig {
-        id: challenge_id,
+        id: challenge_id.clone(),
         name: "term-challenge".to_string(),
         weight: 100,
         is_active: true,
         creator: Hotkey([0u8; 32]),
         created_at: chrono::Utc::now().timestamp_millis(),
+        wasm_hash: [0u8; 32],
     };
 
     state_manager.apply(|s| {
@@ -346,7 +351,7 @@ fn test_challenge_survives_epoch_transition() {
     let mut state = create_state_with_validators(&sudo, &validators);
 
     let challenge = create_test_challenge(&sudo, TERM_CHALLENGE_WASM.to_vec());
-    let challenge_id = challenge.id;
+    let challenge_id = challenge.id.clone();
     state.add_challenge(challenge);
 
     assert_eq!(state.epoch, 0);
@@ -393,9 +398,9 @@ fn test_multiple_challenges_lifecycle() {
         ChallengeConfig::default(),
     );
 
-    let id1 = challenge1.id;
-    let id2 = challenge2.id;
-    let id3 = challenge3.id;
+    let id1 = challenge1.id.clone();
+    let id2 = challenge2.id.clone();
+    let id3 = challenge3.id.clone();
 
     state.add_challenge(challenge1);
     state.add_challenge(challenge2);
@@ -417,6 +422,8 @@ fn test_multiple_challenges_lifecycle() {
 // FULL PIPELINE TESTS
 // ============================================================================
 
+// Requires term-challenge WASM from external repo
+#[ignore]
 #[test]
 fn test_full_evaluation_pipeline() {
     let dir = tempdir().unwrap();
@@ -426,7 +433,7 @@ fn test_full_evaluation_pipeline() {
     let mut state = create_state_with_validators(&sudo, &validators);
 
     let challenge = create_test_challenge(&sudo, TERM_CHALLENGE_WASM.to_vec());
-    let challenge_id = challenge.id;
+    let challenge_id = challenge.id.clone();
 
     state.add_challenge(challenge.clone());
     storage.save_challenge(&challenge).unwrap();
@@ -456,6 +463,8 @@ fn test_full_evaluation_pipeline() {
     let _memory = instance.memory();
 }
 
+// Requires term-challenge WASM from external repo
+#[ignore]
 #[test]
 fn test_full_pipeline_add_persist_load_compile_remove() {
     let dir = tempdir().unwrap();
@@ -470,7 +479,7 @@ fn test_full_pipeline_add_persist_load_compile_remove() {
     }
 
     let challenge = create_test_challenge(&sudo, TERM_CHALLENGE_WASM.to_vec());
-    let challenge_id = challenge.id;
+    let challenge_id = challenge.id.clone();
     let code_hash = challenge.code_hash.clone();
 
     state.add_challenge(challenge.clone());
@@ -585,7 +594,7 @@ fn test_state_serialization_with_wasm_challenge() {
     let mut state = create_state_with_validators(&sudo, &validators);
 
     let challenge = create_test_challenge(&sudo, TERM_CHALLENGE_WASM.to_vec());
-    let challenge_id = challenge.id;
+    let challenge_id = challenge.id.clone();
     state.add_challenge(challenge);
 
     let bytes = bincode::serialize(&state).expect("Serialization should succeed");
