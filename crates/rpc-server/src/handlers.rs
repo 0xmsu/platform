@@ -568,7 +568,8 @@ mod tests {
             max_memory_mb: 2048,
             max_cpu_secs: 60,
             min_validators: 1,
-            params_json: "{}".to_string(),
+            weight_smoothing: 0.0,
+            params: "{}".to_string(),
             wasm: WasmConfig::default(),
         };
         let challenge = Challenge {
@@ -609,7 +610,8 @@ mod tests {
             max_memory_mb: 2048,
             max_cpu_secs: 60,
             min_validators: 1,
-            params_json: "{}".to_string(),
+            weight_smoothing: 0.0,
+            params: "{}".to_string(),
             wasm: WasmConfig::default(),
         };
         let challenge = Challenge {
@@ -659,7 +661,8 @@ mod tests {
             max_memory_mb: 2048,
             max_cpu_secs: 60,
             min_validators: 1,
-            params_json: "{}".to_string(),
+            weight_smoothing: 0.0,
+            params: "{}".to_string(),
             wasm: WasmConfig::default(),
         };
         let challenge = Challenge {

@@ -1,5 +1,8 @@
 //! Core types for challenges
 
+// Re-export ChallengeConfig from platform-core for unified type
+pub use platform_core::challenge::ChallengeConfig;
+
 use platform_core::Hotkey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -69,47 +72,6 @@ pub struct ChallengeMetadata {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub is_active: bool,
-}
-
-/// Challenge configuration
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChallengeConfig {
-    /// Mechanism ID on Bittensor (1, 2, 3... - 0 is reserved)
-    /// Each challenge has its own mechanism for weight setting
-    pub mechanism_id: u8,
-    /// Evaluation timeout in seconds
-    pub evaluation_timeout_secs: u64,
-    /// Maximum memory per evaluation (MB)
-    pub max_memory_mb: u64,
-    /// Minimum validators required for weight consensus
-    pub min_validators_for_weights: usize,
-    /// Weight smoothing factor (0.0 = no smoothing, 1.0 = max smoothing)
-    pub weight_smoothing: f64,
-    /// Custom parameters as JSON
-    pub params: String,
-}
-
-impl Default for ChallengeConfig {
-    fn default() -> Self {
-        Self {
-            mechanism_id: 1,
-            evaluation_timeout_secs: 300,
-            max_memory_mb: 512,
-            min_validators_for_weights: 3,
-            weight_smoothing: 0.3,
-            params: "{}".to_string(),
-        }
-    }
-}
-
-impl ChallengeConfig {
-    /// Create config with specific mechanism ID
-    pub fn with_mechanism(mechanism_id: u8) -> Self {
-        Self {
-            mechanism_id,
-            ..Default::default()
-        }
-    }
 }
 
 /// Agent information
@@ -312,8 +274,8 @@ mod tests {
     #[test]
     fn test_challenge_config_default() {
         let config = ChallengeConfig::default();
-        assert_eq!(config.mechanism_id, 1);
-        assert_eq!(config.evaluation_timeout_secs, 300);
+        assert_eq!(config.mechanism_id, 0);
+        assert_eq!(config.timeout_secs, 300);
         assert_eq!(config.max_memory_mb, 512);
     }
 
@@ -321,7 +283,7 @@ mod tests {
     fn test_challenge_config_with_mechanism() {
         let config = ChallengeConfig::with_mechanism(5);
         assert_eq!(config.mechanism_id, 5);
-        assert_eq!(config.evaluation_timeout_secs, 300); // other fields should use defaults
+        assert_eq!(config.timeout_secs, 300); // other fields should use defaults
     }
 
     #[test]

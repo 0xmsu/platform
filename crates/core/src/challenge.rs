@@ -107,8 +107,13 @@ pub struct ChallengeConfig {
     /// Required validators for consensus
     pub min_validators: usize,
 
+    /// Weight smoothing factor (0.0 = no smoothing, 1.0 = max smoothing)
+    #[serde(default)]
+    pub weight_smoothing: f64,
+
     /// Custom parameters (passed to WASM) - stored as JSON string
-    pub params_json: String,
+    #[serde(alias = "params_json")]
+    pub params: String,
 
     /// WASM module configuration
     #[serde(default)]
@@ -124,7 +129,8 @@ impl Default for ChallengeConfig {
             max_cpu_secs: 1800,
             emission_weight: 0.0,
             min_validators: 1,
-            params_json: "{}".to_string(),
+            weight_smoothing: 0.0,
+            params: "{}".to_string(),
             wasm: WasmConfig::default(),
         }
     }
@@ -387,7 +393,8 @@ mod tests {
         assert_eq!(config.max_cpu_secs, 1800);
         assert_eq!(config.emission_weight, 0.0);
         assert_eq!(config.min_validators, 1);
-        assert_eq!(config.params_json, "{}");
+        assert_eq!(config.weight_smoothing, 0.0);
+        assert_eq!(config.params, "{}");
         assert!(config.wasm.restart_id.is_empty());
     }
 
@@ -533,12 +540,12 @@ mod tests {
     }
 
     #[test]
-    fn test_challenge_config_params_json() {
+    fn test_challenge_config_params() {
         let config = ChallengeConfig::default();
-        assert_eq!(config.params_json, "{}");
+        assert_eq!(config.params, "{}");
 
         let config_mechanism = ChallengeConfig::with_mechanism(2);
-        assert_eq!(config_mechanism.params_json, "{}");
+        assert_eq!(config_mechanism.params, "{}");
     }
 
     #[test]
