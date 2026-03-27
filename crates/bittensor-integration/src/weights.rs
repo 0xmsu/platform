@@ -229,10 +229,9 @@ impl WeightSubmitter {
             return Ok(v);
         }
 
-        let client = self.client.client()?;
-        let version = get_commit_reveal_version(client)
-            .await
-            .unwrap_or(DEFAULT_COMMIT_REVEAL_VERSION);
+        let version = self.client.with_retry(|c| Box::pin(async {
+            get_commit_reveal_version(c).await
+        })).await.unwrap_or(DEFAULT_COMMIT_REVEAL_VERSION);
         self.cached_crv_version = Some(version);
         info!("Commit-reveal version from chain: {}", version);
         Ok(version)
@@ -292,7 +291,7 @@ impl WeightSubmitter {
     }
 
     /// Direct weight submission (no commit-reveal)
-    async fn submit_direct(&self, weights: &[WeightAssignment]) -> Result<String> {
+    async fn submit_direct(&mut self, weights: &[WeightAssignment]) -> Result<String> {
         let (uids, weight_values) = self.prepare_weights(weights)?;
 
         if uids.is_empty() {
@@ -304,16 +303,15 @@ impl WeightSubmitter {
 
         info!("Submitting {} weights directly", uids.len());
 
-        let tx_hash = set_weights(
-            self.client.client()?,
-            self.client.signer()?,
-            self.client.netuid(),
-            &uids,
-            &weight_f32,
-            Some(self.client.version_key()),
-            ExtrinsicWait::Finalized,
-        )
-        .await?;
+        let netuid = self.client.netuid();
+        let version_key = self.client.version_key();
+        let tx_hash = self.client.with_retry_with_signer(|c, s| {
+            let uids = uids.clone();
+            let weight_f32 = weight_f32.clone();
+            Box::pin(async move {
+                set_weights(c, s, netuid, &uids, &weight_f32, Some(version_key), ExtrinsicWait::Finalized).await
+            })
+        }).await?;
 
         info!("Weights submitted: {}", tx_hash);
         Ok(tx_hash)
@@ -353,14 +351,14 @@ impl WeightSubmitter {
 
         info!("Committing weights hash (v2): {}", commit_data.commit_hash);
 
-        let tx_hash = commit_weights(
-            self.client.client()?,
-            self.client.signer()?,
-            self.client.netuid(),
-            &commit_data.commit_hash,
-            ExtrinsicWait::Finalized,
-        )
-        .await?;
+        let netuid = self.client.netuid();
+        let commit_hash = commit_data.commit_hash.clone();
+        let tx_hash = self.client.with_retry_with_signer(|c, s| {
+            let commit_hash = commit_hash.clone();
+            Box::pin(async move {
+                commit_weights(c, s, netuid, &commit_hash, ExtrinsicWait::Finalized).await
+            })
+        }).await?;
 
         // Store pending commit for reveal (salt as hex to avoid serialization issues)
         self.state.pending_commit = Some(PendingCommitV2 {
@@ -390,17 +388,17 @@ impl WeightSubmitter {
             pending.uids, pending.weights, pending.salt_hex, salt
         );
 
-        let tx_hash = reveal_weights(
-            self.client.client()?,
-            self.client.signer()?,
-            self.client.netuid(),
-            &uids_u64,
-            &pending.weights,
-            &salt, // Now correctly passing &[u16]
-            pending.version_key,
-            ExtrinsicWait::Finalized,
-        )
-        .await?;
+        let netuid = self.client.netuid();
+        let version_key = pending.version_key;
+        let weights = pending.weights.clone();
+        let tx_hash = self.client.with_retry_with_signer(|c, s| {
+            let uids_u64 = uids_u64.clone();
+            let salt = salt.clone();
+            let weights = weights.clone();
+            Box::pin(async move {
+                reveal_weights(c, s, netuid, &uids_u64, &weights, &salt, version_key, ExtrinsicWait::Finalized).await
+            })
+        }).await?;
 
         info!("Weights revealed: {}", tx_hash);
         Ok(tx_hash)
@@ -585,15 +583,14 @@ impl WeightSubmitter {
             weights_for_batch.len()
         );
 
-        let tx_hash = batch_set_mechanism_weights(
-            self.client.client()?,
-            self.client.signer()?,
-            self.client.netuid(),
-            weights_for_batch,
-            self.client.version_key(),
-            ExtrinsicWait::Finalized,
-        )
-        .await?;
+        let netuid = self.client.netuid();
+        let version_key = self.client.version_key();
+        let tx_hash = self.client.with_retry_with_signer(|c, s| {
+            let weights_for_batch = weights_for_batch.clone();
+            Box::pin(async move {
+                batch_set_mechanism_weights(c, s, netuid, weights_for_batch, version_key, ExtrinsicWait::Finalized).await
+            })
+        }).await?;
 
         info!("Batch mechanism weights submitted: {}", tx_hash);
         Ok(tx_hash)
@@ -723,18 +720,18 @@ impl WeightSubmitter {
                 mechanism_id, commit.uids, commit.weights, commit.salt_hex, salt, commit.version_key
             );
 
-            let tx_hash = reveal_mechanism_weights(
-                self.client.client()?,
-                self.client.signer()?,
-                self.client.netuid(),
-                mechanism_id,
-                &commit.uids,
-                &commit.weights,
-                &salt,
-                commit.version_key,
-                ExtrinsicWait::Finalized,
-            )
-            .await?;
+            let netuid = self.client.netuid();
+            let version_key = commit.version_key;
+            let uids = commit.uids.clone();
+            let weights = commit.weights.clone();
+            let tx_hash = self.client.with_retry_with_signer(|c, s| {
+                let salt = salt.clone();
+                let uids = uids.clone();
+                let weights = weights.clone();
+                Box::pin(async move {
+                    reveal_mechanism_weights(c, s, netuid, mechanism_id, &uids, &weights, &salt, version_key, ExtrinsicWait::Finalized).await
+                })
+            }).await?;
 
             info!(
                 "Revealed mechanism {} weights: {} (epoch {})",
@@ -1187,11 +1184,11 @@ impl MechanismWeightManager {
     }
 
     /// Get the next epoch start block
-    pub async fn get_next_epoch(&self) -> Result<u64> {
-        let client = self.client.client()?;
-        let next_epoch = get_next_epoch_start_block(client, self.client.netuid(), None)
-            .await?
-            .unwrap_or(0);
+    pub async fn get_next_epoch(&mut self) -> Result<u64> {
+        let netuid = self.client.netuid();
+        let next_epoch = self.client.with_retry(|c| Box::pin(async move {
+            get_next_epoch_start_block(c, netuid, None).await
+        })).await?.unwrap_or(0);
         Ok(next_epoch)
     }
 
@@ -1249,17 +1246,15 @@ impl MechanismWeightManager {
             mechanism_id
         );
 
-        let tx_hash = set_mechanism_weights(
-            self.client.client()?,
-            self.client.signer()?,
-            self.client.netuid(),
-            mechanism_id,
-            &uids,
-            &weight_f32,
-            Some(self.client.version_key()),
-            ExtrinsicWait::Finalized,
-        )
-        .await?;
+        let netuid = self.client.netuid();
+        let version_key = self.client.version_key();
+        let tx_hash = self.client.with_retry_with_signer(|c, s| {
+            let uids = uids.clone();
+            let weight_f32 = weight_f32.clone();
+            Box::pin(async move {
+                set_mechanism_weights(c, s, netuid, mechanism_id, &uids, &weight_f32, Some(version_key), ExtrinsicWait::Finalized).await
+            })
+        }).await?;
 
         // Mark as set for this epoch
         self.last_weight_epoch.insert(mechanism_id, epoch);
@@ -1304,15 +1299,14 @@ impl MechanismWeightManager {
             mechanism_id, commit_data.commit_hash
         );
 
-        let tx_hash = commit_mechanism_weights(
-            self.client.client()?,
-            self.client.signer()?,
-            self.client.netuid(),
-            mechanism_id,
-            &commit_data.commit_hash,
-            ExtrinsicWait::Finalized,
-        )
-        .await?;
+        let netuid = self.client.netuid();
+        let commit_hash = commit_data.commit_hash.clone();
+        let tx_hash = self.client.with_retry_with_signer(|c, s| {
+            let commit_hash = commit_hash.clone();
+            Box::pin(async move {
+                commit_mechanism_weights(c, s, netuid, mechanism_id, &commit_hash, ExtrinsicWait::Finalized).await
+            })
+        }).await?;
 
         // Store pending commit for reveal
         self.pending_mechanism_commits.insert(
@@ -1342,26 +1336,28 @@ impl MechanismWeightManager {
             pending.mechanism_id, pending.hash
         );
 
-        let tx_hash = reveal_mechanism_weights(
-            self.client.client()?,
-            self.client.signer()?,
-            self.client.netuid(),
-            pending.mechanism_id,
-            &pending.uids,
-            &pending.weights,
-            &pending.salt,
-            pending.version_key,
-            ExtrinsicWait::Finalized,
-        )
-        .await?;
+        let netuid = self.client.netuid();
+        let mechanism_id = pending.mechanism_id;
+        let epoch = pending.epoch;
+        let version_key = pending.version_key;
+        let uids = pending.uids.clone();
+        let weights = pending.weights.clone();
+        let salt = pending.salt.clone();
+        let tx_hash = self.client.with_retry_with_signer(|c, s| {
+            let uids = uids.clone();
+            let weights = weights.clone();
+            let salt = salt.clone();
+            Box::pin(async move {
+                reveal_mechanism_weights(c, s, netuid, mechanism_id, &uids, &weights, &salt, version_key, ExtrinsicWait::Finalized).await
+            })
+        }).await?;
 
         // Mark as set for this epoch
-        self.last_weight_epoch
-            .insert(pending.mechanism_id, pending.epoch);
+        self.last_weight_epoch.insert(mechanism_id, epoch);
 
         info!(
             "Mechanism {} weights revealed: {}",
-            pending.mechanism_id, tx_hash
+            mechanism_id, tx_hash
         );
         Ok(Some(tx_hash))
     }

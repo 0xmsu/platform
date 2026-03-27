@@ -62,10 +62,10 @@ Clean and standardize Platform codebase by fixing version conflicts, consolidati
 - SAFETY comments in `crates/challenge-sdk-wasm/src/*.rs` and `bins/validator-node/src/wasm_executor.rs`
 
 ### Definition of Done
-- [ ] `cargo build --workspace --all-features` succeeds
-- [ ] `cargo test --workspace --all-features` passes
-- [ ] `cargo clippy --workspace --all-features` has 0 warnings
-- [ ] No sp-core version conflicts in Cargo.lock
+- [x] `cargo build --workspace --all-features` succeeds
+- [x] `cargo test --workspace --all-features` passes
+- [x] `cargo clippy --workspace --all-features` has 0 warnings
+- [x] No sp-core version conflicts in Cargo.lock
 
 ### Must Have
 - sp-core unified to 38.1.0 across ALL crates

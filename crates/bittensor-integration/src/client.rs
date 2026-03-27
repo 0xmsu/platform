@@ -7,6 +7,41 @@ use bittensor_rs::metagraph::{sync_metagraph, Metagraph};
 use std::collections::HashMap;
 use tracing::info;
 
+/// Check if an error is a transport/connection error that should trigger retry
+fn is_transport_error(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("websocket")
+        || msg.contains("connection reset")
+        || msg.contains("connection refused")
+        || msg.contains("broken pipe")
+        || msg.contains("eof")
+        || msg.contains("channel closed")
+        || msg.contains("timed out")
+        || msg.contains("timeout")
+        || msg.contains("transport")
+        || msg.contains("connection closed")
+        || msg.contains("restart required")
+        || msg.contains("background task")
+}
+
+/// Retry configuration for RPC operations
+#[derive(Clone, Copy, Debug)]
+pub struct RetryConfig {
+    /// Maximum number of retry attempts
+    pub max_retries: u32,
+    /// Base delay between retries in milliseconds (exponential backoff)
+    pub retry_delay_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            retry_delay_ms: 1000,
+        }
+    }
+}
+
 /// Wrapper around bittensor-rs client for Mini-Chain
 pub struct SubtensorClient {
     config: BittensorConfig,
@@ -14,6 +49,7 @@ pub struct SubtensorClient {
     signer: Option<BittensorSigner>,
     metagraph: Option<Metagraph>,
     uid_overrides: HashMap<String, u16>,
+    retry_config: RetryConfig,
 }
 
 impl SubtensorClient {
@@ -25,7 +61,14 @@ impl SubtensorClient {
             signer: None,
             metagraph: None,
             uid_overrides: HashMap::new(),
+            retry_config: RetryConfig::default(),
         }
+    }
+
+    /// Set custom retry configuration
+    pub fn with_retry_config(mut self, config: RetryConfig) -> Self {
+        self.retry_config = config;
+        self
     }
 
     /// Connect to Subtensor
@@ -48,6 +91,76 @@ impl SubtensorClient {
         self.client = Some(client);
         info!("Reconnected to Subtensor");
         Ok(())
+    }
+
+    /// Execute an operation with automatic retry on transport errors.
+    /// Uses exponential backoff between retries.
+    pub async fn with_retry<'a, F, T>(&'a mut self, op: F) -> Result<T>
+    where
+        F: for<'b> Fn(&'b BittensorClient) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + 'b>>,
+    {
+        let mut attempts = 0u32;
+        let max = self.retry_config.max_retries;
+        let base_delay = self.retry_config.retry_delay_ms;
+
+        loop {
+            let client = self.client.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Not connected to Subtensor"))?;
+
+            match op(client).await {
+                Ok(result) => return Ok(result),
+                Err(e) if is_transport_error(&e) && attempts < max => {
+                    attempts += 1;
+                    let delay_ms = base_delay.saturating_mul(1 << attempts.min(10));
+                    info!(
+                        attempts = attempts,
+                        max_retries = max,
+                        delay_ms = delay_ms,
+                        error = %e,
+                        "Transport error, retrying after reconnect..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    self.reconnect().await?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Execute an operation with automatic retry, providing access to both client and signer.
+    /// Uses exponential backoff between retries.
+    pub async fn with_retry_with_signer<'a, F, T>(&'a mut self, op: F) -> Result<T>
+    where
+        F: for<'b> Fn(&'b bittensor_rs::chain::BittensorClient, &'b BittensorSigner) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + 'b>>,
+    {
+        let mut attempts = 0u32;
+        let max = self.retry_config.max_retries;
+        let base_delay = self.retry_config.retry_delay_ms;
+
+        loop {
+            let client = self.client.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Not connected to Subtensor"))?;
+            let signer = self.signer.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Signer not set"))?;
+
+            match op(client, signer).await {
+                Ok(result) => return Ok(result),
+                Err(e) if is_transport_error(&e) && attempts < max => {
+                    attempts += 1;
+                    let delay_ms = base_delay.saturating_mul(1 << attempts.min(10));
+                    info!(
+                        attempts = attempts,
+                        max_retries = max,
+                        delay_ms = delay_ms,
+                        error = %e,
+                        "Transport error, retrying after reconnect..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    self.reconnect().await?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Execute a fallible operation, reconnecting once if the error looks
@@ -137,8 +250,10 @@ impl SubtensorClient {
 
     /// Sync and get the current metagraph
     pub async fn sync_metagraph(&mut self) -> Result<&Metagraph> {
-        let client = self.client()?;
-        let metagraph = sync_metagraph(client, self.config.netuid).await?;
+        let netuid = self.config.netuid;
+        let metagraph = self.with_retry(|client| {
+            Box::pin(sync_metagraph(client, netuid))
+        }).await?;
         self.metagraph = Some(metagraph);
         Ok(self.metagraph.as_ref().unwrap())
     }
