@@ -20,7 +20,6 @@ wasm-runtime-interface = { path = "../wasm-runtime-interface" }
 
 # Sr25519 crypto (Substrate standard)
 sp-core = { workspace = true }
-schnorrkel = "0.11"
 
 [dev-dependencies]
 tempfile = { workspace = true }

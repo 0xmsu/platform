@@ -330,7 +330,7 @@ impl SudoCli {
     async fn send_sudo_action(&self, action: serde_json::Value) -> Result<()> {
         let timestamp = chrono::Utc::now().timestamp_millis();
 
-        let msg_to_sign = format!("sudo:action:{}:{}", action.to_string(), timestamp);
+        let msg_to_sign = format!("sudo:action:{}:{}", action, timestamp);
         let signature = self.sign(msg_to_sign.as_bytes())?;
 
         let request = serde_json::json!({

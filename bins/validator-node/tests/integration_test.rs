@@ -300,7 +300,7 @@ async fn test_storage_write_feeds_consensus_state() {
     let proposal_id = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(&key.to_bytes());
+        hasher.update(key.to_bytes());
         hasher.update(&value);
         let hash: [u8; 32] = hasher.finalize().into();
         hash

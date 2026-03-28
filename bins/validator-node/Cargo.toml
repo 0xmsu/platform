@@ -58,4 +58,4 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 
 # Error tracking
 sentry = { version = "0.46", features = ["tracing"] }
-sentry-tracing = "0.46"
+sentry-tracing = { workspace = true }

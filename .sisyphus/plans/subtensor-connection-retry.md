@@ -119,7 +119,7 @@ Wave FINAL (After ALL tasks - verification):
 
 ## TODOs
 
-- [ ] 1. Add retry configuration to SubtensorClient
+- [x] 1. Add retry configuration to SubtensorClient
 
   **What to do**:
   - Add `RetryConfig` struct to client.rs with `max_retries` and `retry_delay_ms`
@@ -161,7 +161,7 @@ Wave FINAL (After ALL tasks - verification):
     Evidence: .sisyphus/evidence/task-01-check.log
   ```
 
-- [ ] 2. Add with_retry() method for generic operations
+- [x] 2. Add with_retry() method for generic operations
 
   **What to do**:
   - Add async `with_retry<F, T>(&mut self, operation: F) -> Result<T>` method
@@ -228,7 +228,7 @@ Wave FINAL (After ALL tasks - verification):
     Evidence: .sisyphus/evidence/task-02-check.log
   ```
 
-- [ ] 3. Wrap WeightSubmitter methods with retry
+- [x] 3. Wrap WeightSubmitter methods with retry
 
   **What to do**:
   - Refactor `submit_direct()` to use retry
@@ -286,7 +286,7 @@ Wave FINAL (After ALL tasks - verification):
     Evidence: .sisyphus/evidence/task-03-build.log
   ```
 
-- [ ] 4. Wrap MechanismWeightManager methods with retry
+- [x] 4. Wrap MechanismWeightManager methods with retry
 
   **What to do**:
   - Refactor `submit_mechanism_direct()` to use retry
@@ -314,7 +314,7 @@ Wave FINAL (After ALL tasks - verification):
   - [ ] All mechanism weight methods use retry
   - [ ] `cargo test -p platform-bittensor --lib` passes
 
-- [ ] 5. Wrap ValidatorSync with retry
+- [x] 5. Wrap ValidatorSync with retry
 
   **What to do**:
   - Modify `sync()` method to use retry for `sync_metagraph()` call
@@ -341,13 +341,13 @@ Wave FINAL (After ALL tasks - verification):
 
 ## Final Verification Wave
 
-- [ ] F1. Add retry scenario tests
+- [x] F1. Add retry scenario tests
   Add unit tests that simulate connection failures and verify retry behavior.
 
-- [ ] F2. Run full test suite
+- [x] F2. Run full test suite
   Verify no regressions: `cargo test --workspace --all-features`
 
-- [ ] F3. Integration verification
+- [x] F3. Integration verification
   Manual verification that weight submission recovers from simulated disconnects.
 
 ---
@@ -368,9 +368,9 @@ cargo test --workspace --all-features   # Expected: all tests pass
 ```
 
 ### Final Checklist
-- [ ] RetryConfig added to SubtensorClient
-- [ ] with_retry() method implemented with exponential backoff
-- [ ] WeightSubmitter methods wrapped with retry
-- [ ] MechanismWeightManager methods wrapped with retry
-- [ ] ValidatorSync wrapped with retry
-- [ ] Tests for retry scenarios added
+- [x] RetryConfig added to SubtensorClient
+- [x] with_retry() method implemented with exponential backoff
+- [x] WeightSubmitter methods wrapped with retry
+- [x] MechanismWeightManager methods wrapped with retry
+- [x] ValidatorSync wrapped with retry
+- [x] Tests for retry scenarios added

@@ -3170,7 +3170,7 @@ async fn handle_network_event(
                                         state_manager.apply(|state| {
                                             if state.get_challenge(&update.challenge_id).is_none() {
                                                 let challenge_config =
-                                                    platform_p2p_consensus::ChallengeConfig {
+                                                    platform_p2p_consensus::ChallengeRecord {
                                                         id: update.challenge_id.clone(),
                                                         name: challenge_name.clone(),
                                                         weight: 100, // Default weight

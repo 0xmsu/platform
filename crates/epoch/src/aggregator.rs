@@ -126,7 +126,7 @@ impl WeightAggregator {
                 let challenge_id = emissions
                     .first()
                     .map(|e| e.challenge_id.clone())
-                    .unwrap_or_else(|| ChallengeId::default());
+                    .unwrap_or_else(ChallengeId::default);
 
                 AgentEmission {
                     hotkey,

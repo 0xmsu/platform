@@ -947,7 +947,7 @@ mod tests {
         let challenge_dir = dir
             .path()
             .join("challenges")
-            .join(challenge_id.0.to_string());
+            .join(&challenge_id.0);
         std::fs::create_dir_all(&challenge_dir).unwrap();
 
         let applied = manager.process_updates().await.unwrap();
@@ -1047,7 +1047,7 @@ mod tests {
         let wasm_path = dir
             .path()
             .join("challenges")
-            .join(challenge_id.0.to_string())
+            .join(&challenge_id.0)
             .join("code.wasm");
         assert_eq!(std::fs::read(&wasm_path).unwrap(), wasm_bytes);
     }
@@ -1097,7 +1097,7 @@ mod tests {
         let wasm_path = dir
             .path()
             .join("challenges")
-            .join(challenge_id.0.to_string())
+            .join(&challenge_id.0)
             .join("code.wasm");
         assert!(!wasm_path.exists());
         assert!(update.rollback_data.is_none());
@@ -1220,7 +1220,7 @@ mod tests {
         let challenge_dir = dir
             .path()
             .join("challenges")
-            .join(challenge_id.0.to_string());
+            .join(&challenge_id.0);
         std::fs::create_dir_all(&challenge_dir).unwrap();
 
         let update = Update {

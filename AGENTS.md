@@ -202,3 +202,81 @@ Platform is fully decentralized—validators communicate directly via P2P withou
 See the main README for deployment instructions.
 
 For challenge-specific questions, refer to the appropriate challenge crate or repository.
+
+---
+
+## Security Patterns (CRITICAL)
+
+### sudo_key Protection
+
+**INVARIANT**: The `sudo_key` field in `ChainState` CANNOT be changed via:
+- Peer state synchronization (`merge_from()`)
+- ForceStateUpdate action
+- Direct state manipulation
+
+**Implementation** (`core/state.rs`):
+```rust
+// merge_from() preserves local sudo_key
+let local_sudo_key = self.sudo_key.clone();
+// ... merge other fields ...
+self.sudo_key = local_sudo_key;  // RESTORE
+
+// ForceStateUpdate also preserves sudo_key
+*self = state.clone();
+self.sudo_key = local_sudo_key;  // SECURITY
+```
+
+### Authorization Check Pattern
+
+All privileged operations require `is_sudo()` verification:
+```rust
+// consensus.rs lines 221, 363
+if change_type == StateChangeType::ConfigUpdate {
+    let is_sudo = self.state_manager.read(|s| s.is_sudo(&proposer));
+    if !is_sudo {
+        return Err(ConsensusError::InvalidProposal(...));
+    }
+}
+```
+
+### CRITICAL Warning Pattern
+
+"CRITICAL: must use chain state, not system time" appears in:
+- `vendor/bittensor-rs/src/crv4/mod.rs`
+- `vendor/bittensor-rs/src/subtensor.rs`
+- `crates/bittensor-integration/src/weights.rs`
+
+Prevents clock skew manipulation attacks.
+
+---
+
+## Test Patterns
+
+**Integration Tests** (`tests/`):
+- Separate workspace member (`platform-e2e-tests`)
+- Fixture helpers: `create_chain_state()`, `create_five_validators()`
+- `tempfile::tempdir()` for storage isolation
+- `MockChallenge` pattern for challenge testing
+
+**Unit Tests** (inline):
+- `#[cfg(test)] mod tests` at file end
+- `use super::*` for parent access
+- `#[tokio::test]` for async
+
+---
+
+## Commands Quick Reference
+
+```bash
+# Development
+cargo build --release           # Full build
+cargo test --workspace         # All unit tests
+cargo clippy --all-targets     # Lint check
+
+# Integration (requires Docker)
+cargo test -p platform-e2e-tests --test integration_test
+
+# Single crate
+cargo test -p platform-core
+cargo test -p platform-p2p-consensus
+```

@@ -8,7 +8,7 @@
 
 use platform_core::{ChallengeId, Hotkey, Keypair};
 use platform_p2p_consensus::{
-    build_merkle_proof, compute_merkle_root, verify_merkle_proof, ChainState, ChallengeConfig,
+    build_merkle_proof, compute_merkle_root, verify_merkle_proof, ChainState, ChallengeRecord,
     EvaluationRecord, StateManager,
 };
 use std::collections::HashMap;
@@ -284,7 +284,7 @@ fn test_state_hash_unique_per_modification() {
     );
 
     // Add challenge
-    let config = ChallengeConfig {
+    let config = ChallengeRecord {
         id: ChallengeId::new("test-challenge"),
         name: "Test Challenge".to_string(),
         weight: 50,
@@ -410,7 +410,7 @@ fn test_full_state_lifecycle_with_block_linking() {
     assert!(state.sequence > seq_after_genesis);
 
     // Add challenge
-    let challenge = ChallengeConfig {
+    let challenge = ChallengeRecord {
         id: ChallengeId::new("test-challenge"),
         name: "Integration Test Challenge".to_string(),
         weight: 100,
@@ -567,7 +567,7 @@ fn test_challenge_removal_changes_hash() {
     let mut state = ChainState::new(100);
 
     let challenge_id = ChallengeId::new("test-challenge");
-    let config = ChallengeConfig {
+    let config = ChallengeRecord {
         id: challenge_id.clone(),
         name: "Removable Challenge".to_string(),
         weight: 50,
