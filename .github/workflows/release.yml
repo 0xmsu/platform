@@ -43,7 +43,7 @@ jobs:
         run: |
           mkdir -p release
           cp target/release/validator-node release/
-          cp target/release/csudo release/ 2>/dev/null || true
+          cp target/release/platform-sudo release/ 2>/dev/null || true
           tar -czvf platform-${{ needs.release-please.outputs.version }}-linux-x86_64.tar.gz -C release .
 
       - name: Upload release artifacts
