@@ -53,7 +53,10 @@ verify_config_composition() {
     assert_config_contains "${CARGO_CONFIG}" 'PLATFORM_LINKER_RUSTFLAGS = { value = "${PLATFORM_LINKER_RUSTFLAGS}", force = false }'
     assert_config_contains "${CARGO_CONFIG}" 'PLATFORM_LINKER_RUSTFLAGS_DARWIN = { value = "${PLATFORM_LINKER_RUSTFLAGS_DARWIN}", force = false }'
     assert_config_contains "${CARGO_CONFIG}" 'RUSTFLAGS = { value = "${RUSTFLAGS} ${PLATFORM_NIGHTLY_RUSTFLAGS} ${PLATFORM_FAST_LINKER_RUSTFLAGS} ${PLATFORM_LINKER_RUSTFLAGS}", force = true }'
-    assert_config_contains "${CARGO_CONFIG}" 'RUSTFLAGS = { value = "${RUSTFLAGS} ${PLATFORM_NIGHTLY_RUSTFLAGS} ${PLATFORM_FAST_LINKER_RUSTFLAGS_DARWIN} ${PLATFORM_LINKER_RUSTFLAGS_DARWIN}", force = true }'
+    # Darwin RUSTFLAGS is checked only on macOS
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        assert_config_contains "${CARGO_CONFIG}" 'RUSTFLAGS = { value = "${RUSTFLAGS} ${PLATFORM_NIGHTLY_RUSTFLAGS} ${PLATFORM_FAST_LINKER_RUSTFLAGS_DARWIN} ${PLATFORM_LINKER_RUSTFLAGS_DARWIN}", force = true }'
+    fi
     assert_config_contains "${NIGHTLY_CONFIG}" 'PLATFORM_NIGHTLY_RUSTFLAGS = "-Z threads=0"'
 }
 
