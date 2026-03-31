@@ -50,6 +50,8 @@ pub struct ChannelMetrics {
     dropped_count: AtomicU64,
     /// Count of messages successfully sent
     send_count: AtomicU64,
+    /// Count of retry attempts for critical messages
+    retry_count: AtomicU64,
 }
 
 impl ChannelMetrics {
@@ -59,6 +61,7 @@ impl ChannelMetrics {
             capacity,
             dropped_count: AtomicU64::new(0),
             send_count: AtomicU64::new(0),
+            retry_count: AtomicU64::new(0),
         }
     }
 
@@ -74,6 +77,12 @@ impl ChannelMetrics {
         self.send_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Increment the retry counter.
+    /// Called when a critical message is retried.
+    pub fn increment_retry(&self) {
+        self.retry_count.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Get current dropped message count
     pub fn dropped_count(&self) -> u64 {
         self.dropped_count.load(Ordering::Relaxed)
@@ -82,6 +91,11 @@ impl ChannelMetrics {
     /// Get current send success count
     pub fn send_count(&self) -> u64 {
         self.send_count.load(Ordering::Relaxed)
+    }
+
+    /// Get current retry count
+    pub fn retry_total(&self) -> u64 {
+        self.retry_count.load(Ordering::Relaxed)
     }
 
     /// Get channel utilization ratio (not exact, but useful for monitoring)
@@ -155,6 +169,104 @@ pub fn priority_for_message(msg: &P2PMessage) -> MessagePriority {
         
         // Low: Everything else (storage, challenge sync, etc.)
         _ => MessagePriority::Low,
+    }
+}
+
+/// Calculate exponential backoff duration for retry attempts.
+/// 
+/// Backoff sequence: 500ms -> 1s -> 2s -> 4s -> 5s (max)
+fn backoff_duration(attempt: usize) -> Duration {
+    match attempt {
+        0 => Duration::from_millis(500),
+        1 => Duration::from_secs(1),
+        2 => Duration::from_secs(2),
+        3 => Duration::from_secs(4),
+        _ => Duration::from_secs(5),
+    }
+}
+
+/// Maximum number of retry attempts for critical messages
+const MAX_RETRIES: usize = 5;
+
+/// Entry in the retry queue for failed critical messages.
+struct RetryEntry {
+    /// The command that failed to send
+    cmd: P2PCommand,
+    /// Current retry attempt number (0-indexed)
+    attempt: usize,
+    /// When to retry this message
+    next_retry_at: std::time::Instant,
+}
+
+/// Queue for retrying failed critical priority messages.
+/// 
+/// When send_timeout fails for critical messages (Proposal, PrePrepare, Prepare,
+/// Commit, ViewChange), they are queued for retry with exponential backoff.
+pub struct RetryQueue {
+    /// Pending messages awaiting retry
+    pending: std::sync::Mutex<VecDeque<RetryEntry>>,
+}
+
+impl RetryQueue {
+    /// Create a new empty retry queue
+    pub fn new() -> Self {
+        Self {
+            pending: std::sync::Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// Add a critical message to the retry queue.
+    /// Returns false if max retries exceeded.
+    pub fn enqueue(&self, cmd: P2PCommand, current_attempt: usize) -> bool {
+        if current_attempt >= MAX_RETRIES {
+            return false;
+        }
+        
+        let entry = RetryEntry {
+            cmd,
+            attempt: current_attempt,
+            next_retry_at: std::time::Instant::now() + backoff_duration(current_attempt),
+        };
+        
+        self.pending.lock().unwrap().push_back(entry);
+        true
+    }
+
+    /// Get messages that are ready to retry.
+    /// Returns (command, attempt_number) pairs.
+    pub fn get_ready(&self) -> Vec<(P2PCommand, usize)> {
+        let mut pending = self.pending.lock().unwrap();
+        let now = std::time::Instant::now();
+        let mut ready = Vec::new();
+        
+        // Collect ready entries (those past their retry time)
+        let mut remaining = VecDeque::new();
+        while let Some(entry) = pending.pop_front() {
+            if entry.next_retry_at <= now {
+                ready.push((entry.cmd, entry.attempt));
+            } else {
+                remaining.push_back(entry);
+            }
+        }
+        
+        *pending = remaining;
+        ready
+    }
+
+    /// Check if the queue is empty
+    pub fn is_empty(&self) -> bool {
+        self.pending.lock().unwrap().is_empty()
+    }
+
+    /// Get the number of pending messages
+    pub fn len(&self) -> usize {
+        self.pending.lock().unwrap().len()
+    }
+}
+
+impl Default for RetryQueue {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -291,15 +403,29 @@ pub trait P2PSender: Send + Sync {
 /// Real P2P sender that wraps the actual mpsc channel.
 ///
 /// This is used in production to send P2P commands through the network layer.
+/// Includes retry queue for critical messages that fail to send.
 pub struct RealP2PSender {
     tx: mpsc::Sender<P2PCommand>,
     metrics: Option<Arc<ChannelMetrics>>,
+    retry_queue: Arc<RetryQueue>,
+}
+
+/// Check if a P2PCommand contains a critical priority message.
+fn is_critical_command(cmd: &P2PCommand) -> bool {
+    match cmd {
+        P2PCommand::Broadcast(msg) => priority_for_message(msg) == MessagePriority::Critical,
+        _ => false,
+    }
 }
 
 impl RealP2PSender {
     /// Create a new RealP2PSender wrapping the given channel sender.
     pub fn new(tx: mpsc::Sender<P2PCommand>) -> Self {
-        Self { tx, metrics: None }
+        Self {
+            tx,
+            metrics: None,
+            retry_queue: Arc::new(RetryQueue::new()),
+        }
     }
 
     /// Create a new RealP2PSender with metrics tracking.
@@ -307,7 +433,50 @@ impl RealP2PSender {
         Self {
             tx,
             metrics: Some(metrics),
+            retry_queue: Arc::new(RetryQueue::new()),
         }
+    }
+
+    /// Get the retry queue for processing retries externally.
+    pub fn retry_queue(&self) -> Arc<RetryQueue> {
+        self.retry_queue.clone()
+    }
+
+    /// Process pending retries. Returns number of messages retried.
+    pub fn process_retries(&self) -> usize {
+        let ready = self.retry_queue.get_ready();
+        let count = ready.len();
+        
+        for (cmd, attempt) in ready {
+            if let Some(ref metrics) = self.metrics {
+                metrics.increment_retry();
+            }
+            
+            match self.tx.try_send(cmd.clone()) {
+                Ok(()) => {
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.increment_sent();
+                    }
+                    debug!(
+                        attempt = attempt + 1,
+                        "Retry send succeeded"
+                    );
+                }
+                Err(e) => {
+                    let next_attempt = attempt + 1;
+                    if !self.retry_queue.enqueue(cmd, next_attempt) {
+                        error!(
+                            attempt = next_attempt,
+                            error = %e,
+                            "Critical message retry exhausted after {} attempts",
+                            next_attempt
+                        );
+                    }
+                }
+            }
+        }
+        
+        count
     }
 }
 
@@ -341,6 +510,8 @@ impl P2PSender for RealP2PSender {
         timeout: Duration,
     ) -> Result<(), mpsc::error::SendError<P2PCommand>> {
         let cmd_clone = cmd.clone();
+        let is_critical = is_critical_command(&cmd);
+        
         match tokio::time::timeout(timeout, self.tx.send(cmd)).await {
             Ok(result) => {
                 if result.is_ok() {
@@ -356,11 +527,28 @@ impl P2PSender for RealP2PSender {
                 if let Some(ref metrics) = self.metrics {
                     metrics.increment_dropped();
                 }
-                warn!(
-                    timeout_ms = timeout.as_millis(),
-                    metrics_dropped = self.metrics.as_ref().map(|m| m.dropped_count()).unwrap_or(0),
-                    "P2P channel send timeout"
-                );
+                
+                if is_critical {
+                    if !self.retry_queue.enqueue(cmd_clone.clone(), 0) {
+                        error!(
+                            timeout_ms = timeout.as_millis(),
+                            "Critical message rejected - max retries exceeded"
+                        );
+                    } else {
+                        warn!(
+                            timeout_ms = timeout.as_millis(),
+                            metrics_dropped = self.metrics.as_ref().map(|m| m.dropped_count()).unwrap_or(0),
+                            "Critical message queued for retry"
+                        );
+                    }
+                } else {
+                    warn!(
+                        timeout_ms = timeout.as_millis(),
+                        metrics_dropped = self.metrics.as_ref().map(|m| m.dropped_count()).unwrap_or(0),
+                        "P2P channel send timeout"
+                    );
+                }
+                
                 Err(mpsc::error::SendError(cmd_clone))
             }
         }
@@ -2369,5 +2557,145 @@ mod tests {
         assert!(sender.try_send(P2PCommand::Shutdown).is_ok());
         assert!(sender.try_send(P2PCommand::Shutdown).is_ok());
         assert!(sender.try_send(P2PCommand::Shutdown).is_err());
+    }
+
+    #[test]
+    fn test_backoff_duration() {
+        assert_eq!(backoff_duration(0), Duration::from_millis(500));
+        assert_eq!(backoff_duration(1), Duration::from_secs(1));
+        assert_eq!(backoff_duration(2), Duration::from_secs(2));
+        assert_eq!(backoff_duration(3), Duration::from_secs(4));
+        assert_eq!(backoff_duration(4), Duration::from_secs(5));
+        assert_eq!(backoff_duration(5), Duration::from_secs(5));
+        assert_eq!(backoff_duration(100), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_retry_queue_new() {
+        let queue = RetryQueue::new();
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn test_retry_queue_enqueue_success() {
+        let queue = RetryQueue::new();
+        let cmd = P2PCommand::Shutdown;
+        
+        assert!(queue.enqueue(cmd, 0));
+        assert!(!queue.is_empty());
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn test_retry_queue_enqueue_max_retries() {
+        let queue = RetryQueue::new();
+        let cmd = P2PCommand::Shutdown;
+        
+        assert!(queue.enqueue(cmd.clone(), 0));
+        assert!(queue.enqueue(cmd.clone(), 1));
+        assert!(queue.enqueue(cmd.clone(), 2));
+        assert!(queue.enqueue(cmd.clone(), 3));
+        assert!(queue.enqueue(cmd.clone(), 4));
+        
+        assert!(!queue.enqueue(cmd, 5));
+    }
+
+    #[test]
+    fn test_retry_queue_get_ready_empty() {
+        let queue = RetryQueue::new();
+        let ready = queue.get_ready();
+        assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn test_retry_queue_get_ready_after_delay() {
+        let queue = RetryQueue::new();
+        let cmd = P2PCommand::Shutdown;
+        
+        queue.enqueue(cmd.clone(), 0);
+        
+        let ready = queue.get_ready();
+        assert!(ready.is_empty());
+        assert_eq!(queue.len(), 1);
+        
+        std::thread::sleep(Duration::from_millis(600));
+        
+        let ready = queue.get_ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].1, 0);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_retry_queue_multiple_entries() {
+        let queue = RetryQueue::new();
+        
+        queue.enqueue(P2PCommand::Shutdown, 0);
+        queue.enqueue(P2PCommand::Shutdown, 1);
+        queue.enqueue(P2PCommand::Shutdown, 2);
+        
+        assert_eq!(queue.len(), 3);
+        
+        std::thread::sleep(Duration::from_millis(2100));
+        
+        let ready = queue.get_ready();
+        assert_eq!(ready.len(), 3);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_is_critical_command() {
+        use crate::messages::{ConsensusProposal, ProposalContent, StateChangeType};
+        
+        let proposal = P2PMessage::Proposal(ConsensusProposal {
+            view: 0,
+            sequence: 0,
+            proposal: ProposalContent {
+                change_type: StateChangeType::WeightUpdate,
+                data: vec![],
+                data_hash: [0u8; 32],
+            },
+            proposer: Hotkey([0u8; 32]),
+            signature: vec![],
+            timestamp: 0,
+        });
+        
+        assert!(is_critical_command(&P2PCommand::Broadcast(proposal)));
+        
+        assert!(!is_critical_command(&P2PCommand::Shutdown));
+        assert!(!is_critical_command(&P2PCommand::Dial("127.0.0.1".to_string())));
+    }
+
+    #[test]
+    fn test_channel_metrics_retry() {
+        let metrics = ChannelMetrics::new(100);
+        assert_eq!(metrics.retry_total(), 0);
+        
+        metrics.increment_retry();
+        assert_eq!(metrics.retry_total(), 1);
+        
+        metrics.increment_retry();
+        metrics.increment_retry();
+        assert_eq!(metrics.retry_total(), 3);
+    }
+
+    #[test]
+    fn test_real_p2p_sender_retry_queue() {
+        let (tx, _rx) = mpsc::channel(2);
+        let sender = RealP2PSender::new(tx);
+        
+        let queue = sender.retry_queue();
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_real_p2p_sender_with_metrics_retry() {
+        let (tx, _rx) = mpsc::channel(2);
+        let metrics = Arc::new(ChannelMetrics::new(2));
+        let sender = RealP2PSender::with_metrics(tx, metrics.clone());
+        
+        assert_eq!(metrics.retry_total(), 0);
+        assert!(sender.retry_queue().is_empty());
     }
 }
