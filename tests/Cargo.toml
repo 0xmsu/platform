@@ -49,6 +49,10 @@ name = "wasm_challenge_tests"
 path = "wasm_challenge_tests.rs"
 required-features = ["wasm-tests"]
 
+[[test]]
+name = "channel_overflow_test"
+path = "channel_overflow_test.rs"
+
 [dependencies]
 platform-core = { path = "../crates/core" }
 platform-storage = { path = "../crates/storage" }
