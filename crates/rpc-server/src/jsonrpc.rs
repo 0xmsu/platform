@@ -1156,7 +1156,7 @@ impl RpcHandler {
             .unwrap_or_default();
 
         // Resolve challenge_id (can be UUID or name like "bounty-challenge")
-        let (resolved_id, _challenge_uuid) = {
+        let (resolved_id, challenge_uuid) = {
             let chain = self.chain_state.read();
 
             // Try parsing as UUID first
@@ -1192,13 +1192,9 @@ impl RpcHandler {
             }
         };
 
-        // Verify the challenge has registered routes
+        // Verify the challenge has registered routes (use pre-resolved UUID)
         {
             let chain = self.chain_state.read();
-            let challenge_uuid = uuid::Uuid::parse_str(&resolved_id)
-                .ok()
-                .map(|u| platform_core::ChallengeId(u.to_string()));
-
             let has_routes = challenge_uuid
                 .as_ref()
                 .map(|cid| chain.challenge_routes.contains_key(cid))
