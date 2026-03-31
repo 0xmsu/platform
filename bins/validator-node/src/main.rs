@@ -500,6 +500,10 @@ async fn main() -> Result<()> {
     let (p2p_cmd_tx, p2p_cmd_rx) =
         tokio::sync::mpsc::channel::<platform_p2p_consensus::P2PCommand>(4096);
 
+    let p2p_sender: Arc<dyn platform_p2p_consensus::P2PSender> = Arc::new(
+        platform_p2p_consensus::RealP2PSender::new(p2p_cmd_tx.clone())
+    );
+
     // Spawn P2P network task
     let network_clone = network.clone();
     tokio::spawn(async move {
@@ -1263,7 +1267,7 @@ async fn main() -> Result<()> {
     > = Arc::new(RwLock::new(std::collections::HashMap::new()));
 
     // Clone p2p_cmd_tx for use in the loop
-    let p2p_broadcast_tx = p2p_cmd_tx.clone();
+    let p2p_broadcast_tx = p2p_sender.clone();
     let mut weights_cached_at_startup = false;
 
     loop {
@@ -1278,7 +1282,7 @@ async fn main() -> Result<()> {
                     &wasm_executor,
                     &storage,
                     &keypair,
-                    &p2p_cmd_tx,
+                    &p2p_broadcast_tx,
                     &chain_state,
                     &challenge_last_sync,
                     &shared_llm_validators_json,
@@ -2516,7 +2520,7 @@ async fn handle_network_event(
     wasm_executor_ref: &Option<Arc<WasmChallengeExecutor>>,
     storage: &Arc<TrackedStorage>,
     keypair: &Keypair,
-    p2p_cmd_tx: &tokio::sync::mpsc::Sender<platform_p2p_consensus::P2PCommand>,
+    p2p_sender: &Arc<dyn platform_p2p_consensus::P2PSender>,
     chain_state: &Arc<RwLock<platform_core::ChainState>>,
     challenge_last_sync: &Arc<RwLock<std::collections::HashMap<platform_core::ChallengeId, u64>>>,
     shared_llm_validators_json: &Arc<parking_lot::RwLock<Vec<u8>>>,
@@ -2668,7 +2672,7 @@ async fn handle_network_event(
                         );
 
                         if let Err(e) =
-                            p2p_cmd_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(req))
+                            p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(req))
                         {
                             warn!(error = %e, "Failed to send core state request");
                         }
@@ -2901,7 +2905,7 @@ async fn handle_network_event(
                                 },
                             );
 
-                            if let Err(e) = p2p_cmd_tx
+                            if let Err(e) = p2p_sender
                                 .try_send(platform_p2p_consensus::P2PCommand::Broadcast(response))
                             {
                                 warn!(error = %e, "Failed to send storage data response");
@@ -3064,7 +3068,7 @@ async fn handle_network_event(
                         },
                     );
                     if let Err(e) =
-                        p2p_cmd_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(resp))
+                        p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(resp))
                     {
                         warn!(error = %e, "Failed to send leaderboard response");
                     }
@@ -3566,7 +3570,7 @@ async fn handle_network_event(
                     }
 
                     if let Err(e) =
-                        p2p_cmd_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg))
+                        p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg))
                     {
                         warn!(error = %e, "Failed to broadcast storage vote");
                     }
@@ -3767,7 +3771,7 @@ async fn handle_network_event(
                                 },
                             );
 
-                            if let Err(e) = p2p_cmd_tx
+                            if let Err(e) = p2p_sender
                                 .try_send(platform_p2p_consensus::P2PCommand::Broadcast(req))
                             {
                                 warn!(error = %e, "Failed to send storage sync request");
@@ -3839,7 +3843,7 @@ async fn handle_network_event(
                     );
 
                     if let Err(e) =
-                        p2p_cmd_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg))
+                        p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg))
                     {
                         warn!(error = %e, "Failed to broadcast state mutation vote");
                     }
@@ -4024,7 +4028,7 @@ async fn handle_network_event(
                     );
 
                     if let Err(e) =
-                        p2p_cmd_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(response))
+                        p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(response))
                     {
                         warn!(error = %e, "Failed to send core state response");
                     }
@@ -4163,7 +4167,7 @@ async fn handle_network_event(
                     );
 
                     if let Err(e) =
-                        p2p_cmd_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(req))
+                        p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(req))
                     {
                         warn!(error = %e, "Failed to send storage sync request");
                     }
@@ -4274,7 +4278,7 @@ async fn handle_network_event(
                                     },
                                 );
 
-                                if let Err(e) = p2p_cmd_tx
+                                if let Err(e) = p2p_sender
                                     .try_send(platform_p2p_consensus::P2PCommand::Broadcast(resp))
                                 {
                                     warn!(error = %e, "Failed to send storage sync response");
@@ -5605,7 +5609,7 @@ async fn process_wasm_evaluations(
     executor: &Arc<WasmChallengeExecutor>,
     state_manager: &Arc<StateManager>,
     keypair: &Keypair,
-    p2p_cmd_tx: &tokio::sync::mpsc::Sender<platform_p2p_consensus::P2PCommand>,
+    p2p_sender: &Arc<dyn platform_p2p_consensus::P2PSender>,
 ) {
     let pending: Vec<(String, ChallengeId, String)> = state_manager.read(|state| {
         state
@@ -5804,7 +5808,7 @@ async fn process_wasm_evaluations(
             signature,
             timestamp,
         });
-        if let Err(e) = p2p_cmd_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(eval_msg))
+        if let Err(e) = p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(eval_msg))
         {
             warn!(
                 submission_id = %submission_id,

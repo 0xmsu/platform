@@ -129,6 +129,98 @@ pub enum P2PEvent {
     PeerDisconnected(PeerId),
 }
 
+/// Trait for sending P2P commands, allowing abstraction for testing.
+///
+/// This trait abstracts the P2P broadcast mechanism so that:
+/// - Production code uses `RealP2PSender` wrapping the actual channel
+/// - Test code can use `MockP2PSender` for verification
+///
+/// Future work: Will be extended with `send_timeout()` for tiered backpressure.
+pub trait P2PSender: Send + Sync {
+    /// Attempts to send a P2P command without blocking.
+    ///
+    /// Returns `Err(TrySendError::Full)` if the channel is at capacity.
+    /// Returns `Err(TrySendError::Disconnected)` if the receiver has been dropped.
+    fn try_send(&self, cmd: P2PCommand) -> Result<(), mpsc::error::TrySendError<P2PCommand>>;
+}
+
+/// Real P2P sender that wraps the actual mpsc channel.
+///
+/// This is used in production to send P2P commands through the network layer.
+pub struct RealP2PSender {
+    tx: mpsc::Sender<P2PCommand>,
+}
+
+impl RealP2PSender {
+    /// Create a new RealP2PSender wrapping the given channel sender.
+    pub fn new(tx: mpsc::Sender<P2PCommand>) -> Self {
+        Self { tx }
+    }
+}
+
+impl P2PSender for RealP2PSender {
+    fn try_send(&self, cmd: P2PCommand) -> Result<(), mpsc::error::TrySendError<P2PCommand>> {
+        self.tx.try_send(cmd)
+    }
+}
+
+/// Mock P2P sender for testing purposes.
+///
+/// Records all commands sent through it for verification in tests.
+#[cfg(test)]
+pub struct MockP2PSender {
+    /// Records of all commands sent, in order.
+    pub sent: std::sync::Mutex<Vec<P2PCommand>>,
+    /// If set, return this error instead of succeeding.
+    pub next_error: std::sync::Mutex<Option<mpsc::error::TrySendError<P2PCommand>>>,
+}
+
+#[cfg(test)]
+impl MockP2PSender {
+    /// Create a new MockP2PSender with empty sent records.
+    pub fn new() -> Self {
+        Self {
+            sent: std::sync::Mutex::new(Vec::new()),
+            next_error: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Set the next error to return on try_send.
+    /// Pass None to clear the error and return success.
+    pub fn set_next_error(&self, error: Option<mpsc::error::TrySendError<P2PCommand>>) {
+        *self.next_error.lock().unwrap() = error;
+    }
+
+    /// Get all sent commands, clearing the internal buffer.
+    pub fn take_sent(&self) -> Vec<P2PCommand> {
+        self.sent.lock().unwrap().drain(..).collect()
+    }
+
+    /// Get the count of sent commands.
+    pub fn sent_count(&self) -> usize {
+        self.sent.lock().unwrap().len()
+    }
+}
+
+#[cfg(test)]
+impl Default for MockP2PSender {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+impl P2PSender for MockP2PSender {
+    fn try_send(&self, cmd: P2PCommand) -> Result<(), mpsc::error::TrySendError<P2PCommand>> {
+        if let Some(err) = self.next_error.lock().unwrap().take() {
+            Err(err)
+        } else {
+            self.sent.lock().unwrap().push(cmd);
+            Ok(())
+        }
+    }
+}
+
 /// Mapping between peer IDs and validator hotkeys
 pub struct PeerMapping {
     /// PeerId -> Hotkey

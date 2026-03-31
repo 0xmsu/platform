@@ -59,7 +59,7 @@ pub use messages::{
 };
 pub use network::{
     CombinedBehaviour, CombinedEvent, NetworkBehaviour, NetworkError, NetworkEvent, NetworkRunner,
-    P2PCommand, P2PEvent, P2PNetwork, PeerMapping,
+    P2PCommand, P2PEvent, P2PNetwork, P2PSender, PeerMapping, RealP2PSender,
 };
 pub use state::{
     build_merkle_proof, compute_merkle_root, verify_merkle_proof, ChainState, ChallengeRecord,
