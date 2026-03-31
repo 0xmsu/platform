@@ -19,11 +19,84 @@ use libp2p::{
 use parking_lot::RwLock;
 use platform_core::{hash_data, Hotkey, Keypair};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+/// Channel metrics for monitoring P2P message channel utilization.
+///
+/// Uses atomic counters for thread-safe updates without locking.
+/// Can be queried periodically for monitoring or logged on significant events.
+///
+/// # Example
+///
+/// ```ignore
+/// let metrics = Arc::new(ChannelMetrics::new(4096));
+/// // ... pass to RealP2PSender ...
+/// 
+/// // Query current stats
+/// let dropped = metrics.dropped_count();
+/// let sent = metrics.send_count();
+/// warn!("Channel stats: dropped={}, sent={}, capacity={}", 
+///       dropped, sent, metrics.capacity);
+/// ```
+pub struct ChannelMetrics {
+    /// Maximum channel capacity
+    pub capacity: usize,
+    /// Count of messages that failed to send (channel full or disconnected)
+    dropped_count: AtomicU64,
+    /// Count of messages successfully sent
+    send_count: AtomicU64,
+}
+
+impl ChannelMetrics {
+    /// Create new metrics with given capacity
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            dropped_count: AtomicU64::new(0),
+            send_count: AtomicU64::new(0),
+        }
+    }
+
+    /// Increment the dropped message counter.
+    /// Called when a message fails to send.
+    pub fn increment_dropped(&self) {
+        self.dropped_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment the send success counter.
+    /// Called when a message is successfully sent.
+    pub fn increment_sent(&self) {
+        self.send_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get current dropped message count
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped_count.load(Ordering::Relaxed)
+    }
+
+    /// Get current send success count
+    pub fn send_count(&self) -> u64 {
+        self.send_count.load(Ordering::Relaxed)
+    }
+
+    /// Get channel utilization ratio (not exact, but useful for monitoring)
+    /// Returns a value between 0.0 and 1.0+ 
+    pub fn drop_ratio(&self) -> f64 {
+        let sent = self.send_count.load(Ordering::Relaxed);
+        let dropped = self.dropped_count.load(Ordering::Relaxed);
+        let total = sent + dropped;
+        if total == 0 {
+            0.0
+        } else {
+            dropped as f64 / total as f64
+        }
+    }
+}
 
 /// Network errors
 #[derive(Error, Debug)]
@@ -149,18 +222,45 @@ pub trait P2PSender: Send + Sync {
 /// This is used in production to send P2P commands through the network layer.
 pub struct RealP2PSender {
     tx: mpsc::Sender<P2PCommand>,
+    metrics: Option<Arc<ChannelMetrics>>,
 }
 
 impl RealP2PSender {
     /// Create a new RealP2PSender wrapping the given channel sender.
     pub fn new(tx: mpsc::Sender<P2PCommand>) -> Self {
-        Self { tx }
+        Self { tx, metrics: None }
+    }
+
+    /// Create a new RealP2PSender with metrics tracking.
+    pub fn with_metrics(tx: mpsc::Sender<P2PCommand>, metrics: Arc<ChannelMetrics>) -> Self {
+        Self {
+            tx,
+            metrics: Some(metrics),
+        }
     }
 }
 
 impl P2PSender for RealP2PSender {
     fn try_send(&self, cmd: P2PCommand) -> Result<(), mpsc::error::TrySendError<P2PCommand>> {
-        self.tx.try_send(cmd)
+        match self.tx.try_send(cmd) {
+            Ok(()) => {
+                if let Some(ref metrics) = self.metrics {
+                    metrics.increment_sent();
+                }
+                Ok(())
+            }
+            Err(e) => {
+                if let Some(ref metrics) = self.metrics {
+                    metrics.increment_dropped();
+                }
+                warn!(
+                    error = %e,
+                    metrics_dropped = self.metrics.as_ref().map(|m| m.dropped_count()).unwrap_or(0),
+                    "P2P channel send failed"
+                );
+                Err(e)
+            }
+        }
     }
 }
 
@@ -2073,5 +2173,88 @@ mod tests {
         network.peer_mapping.remove_peer(&peer_id2);
         assert!(network.has_min_peers(2));
         assert!(!network.has_min_peers(3));
+    }
+
+    #[test]
+    fn test_channel_metrics_basic() {
+        let metrics = ChannelMetrics::new(100);
+        assert_eq!(metrics.capacity, 100);
+        assert_eq!(metrics.dropped_count(), 0);
+        assert_eq!(metrics.send_count(), 0);
+    }
+
+    #[test]
+    fn test_channel_metrics_increment_sent() {
+        let metrics = ChannelMetrics::new(100);
+        metrics.increment_sent();
+        assert_eq!(metrics.send_count(), 1);
+        metrics.increment_sent();
+        metrics.increment_sent();
+        assert_eq!(metrics.send_count(), 3);
+    }
+
+    #[test]
+    fn test_channel_metrics_increment_dropped() {
+        let metrics = ChannelMetrics::new(100);
+        metrics.increment_dropped();
+        assert_eq!(metrics.dropped_count(), 1);
+        metrics.increment_dropped();
+        metrics.increment_dropped();
+        assert_eq!(metrics.dropped_count(), 3);
+    }
+
+    #[test]
+    fn test_channel_metrics_drop_ratio() {
+        let metrics = ChannelMetrics::new(100);
+        assert_eq!(metrics.drop_ratio(), 0.0);
+
+        for _ in 0..10 {
+            metrics.increment_sent();
+        }
+        assert_eq!(metrics.drop_ratio(), 0.0);
+
+        for _ in 0..5 {
+            metrics.increment_dropped();
+        }
+        let ratio = metrics.drop_ratio();
+        assert!(ratio > 0.32 && ratio < 0.34);
+
+        let metrics2 = ChannelMetrics::new(100);
+        for _ in 0..10 {
+            metrics2.increment_sent();
+            metrics2.increment_dropped();
+        }
+        assert!((metrics2.drop_ratio() - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_real_p2p_sender_with_metrics() {
+        let (tx, _rx) = mpsc::channel(2);
+        let metrics = Arc::new(ChannelMetrics::new(2));
+
+        let sender = RealP2PSender::with_metrics(tx, metrics.clone());
+
+        let cmd1 = P2PCommand::Shutdown;
+        assert!(sender.try_send(cmd1).is_ok());
+        assert_eq!(metrics.send_count(), 1);
+
+        let cmd2 = P2PCommand::Shutdown;
+        assert!(sender.try_send(cmd2).is_ok());
+        assert_eq!(metrics.send_count(), 2);
+
+        let cmd3 = P2PCommand::Shutdown;
+        let result = sender.try_send(cmd3);
+        assert!(result.is_err());
+        assert_eq!(metrics.dropped_count(), 1);
+    }
+
+    #[test]
+    fn test_real_p2p_sender_without_metrics() {
+        let (tx, _rx) = mpsc::channel(2);
+        let sender = RealP2PSender::new(tx);
+
+        assert!(sender.try_send(P2PCommand::Shutdown).is_ok());
+        assert!(sender.try_send(P2PCommand::Shutdown).is_ok());
+        assert!(sender.try_send(P2PCommand::Shutdown).is_err());
     }
 }
