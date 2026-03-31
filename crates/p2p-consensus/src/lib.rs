@@ -58,9 +58,9 @@ pub use messages::{
     WeightVoteMessage,
 };
 pub use network::{
-    ChannelMetrics, CombinedBehaviour, CombinedEvent, NetworkBehaviour, NetworkError,
-    NetworkEvent, NetworkRunner, P2PCommand, P2PEvent, P2PNetwork, P2PSender, PeerMapping,
-    RealP2PSender,
+    ChannelMetrics, CombinedBehaviour, CombinedEvent, MessagePriority, NetworkBehaviour,
+    NetworkError, NetworkEvent, NetworkRunner, P2PCommand, P2PEvent, P2PNetwork, P2PSender,
+    PeerMapping, RealP2PSender, priority_for_message,
 };
 pub use state::{
     build_merkle_proof, compute_merkle_root, verify_merkle_proof, ChainState, ChallengeRecord,

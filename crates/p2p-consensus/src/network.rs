@@ -98,6 +98,66 @@ impl ChannelMetrics {
     }
 }
 
+/// Message priority levels for tiered backpressure.
+///
+/// Critical messages (Proposal, PrePrepare, Prepare, Commit, ViewChange) use
+/// longer timeouts to ensure consensus progress.
+/// Lower priority messages use shorter timeouts to avoid blocking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessagePriority {
+    /// Critical consensus messages - 500ms timeout
+    /// Includes: Proposal, PrePrepare, Prepare, Commit, ViewChange
+    Critical,
+    /// High priority state mutations - 200ms timeout
+    /// Includes: StateMutationProposal, StateMutationVote
+    High,
+    /// Medium priority network health - 100ms timeout
+    /// Includes: Heartbeat, WeightVote
+    Medium,
+    /// Low priority storage/replication - 10ms timeout
+    /// Includes: StorageProposal, StorageVote, and other messages
+    Low,
+}
+
+impl MessagePriority {
+    /// Get the timeout duration for this priority level.
+    pub fn timeout(&self) -> Duration {
+        match self {
+            MessagePriority::Critical => Duration::from_millis(500),
+            MessagePriority::High => Duration::from_millis(200),
+            MessagePriority::Medium => Duration::from_millis(100),
+            MessagePriority::Low => Duration::from_millis(10),
+        }
+    }
+}
+
+/// Determine the priority level for a P2P message.
+///
+/// Critical messages (consensus) get longer timeouts.
+/// Lower priority messages (storage) get shorter timeouts.
+pub fn priority_for_message(msg: &P2PMessage) -> MessagePriority {
+    match msg {
+        // Critical: Consensus messages essential for progress
+        P2PMessage::Proposal(_)
+        | P2PMessage::PrePrepare(_)
+        | P2PMessage::Prepare(_)
+        | P2PMessage::Commit(_)
+        | P2PMessage::ViewChange(_)
+        | P2PMessage::NewView(_) => MessagePriority::Critical,
+        
+        // High: State mutation messages for configuration changes
+        P2PMessage::StateMutationProposal(_)
+        | P2PMessage::StateMutationVote(_) => MessagePriority::High,
+        
+        // Medium: Network health messages
+        P2PMessage::Heartbeat(_)
+        | P2PMessage::WeightVote(_) => MessagePriority::Medium,
+        
+        // Low: Everything else (storage, challenge sync, etc.)
+        _ => MessagePriority::Low,
+    }
+}
+
 /// Network errors
 #[derive(Error, Debug)]
 pub enum NetworkError {
@@ -208,13 +268,24 @@ pub enum P2PEvent {
 /// - Production code uses `RealP2PSender` wrapping the actual channel
 /// - Test code can use `MockP2PSender` for verification
 ///
-/// Future work: Will be extended with `send_timeout()` for tiered backpressure.
+/// Provides tiered backpressure via `send_timeout()` with message-dependent timeouts.
+#[async_trait::async_trait]
 pub trait P2PSender: Send + Sync {
     /// Attempts to send a P2P command without blocking.
     ///
     /// Returns `Err(TrySendError::Full)` if the channel is at capacity.
     /// Returns `Err(TrySendError::Disconnected)` if the receiver has been dropped.
     fn try_send(&self, cmd: P2PCommand) -> Result<(), mpsc::error::TrySendError<P2PCommand>>;
+
+    /// Sends a P2P command with timeout for backpressure handling.
+    ///
+    /// Waits up to `timeout` duration for channel capacity.
+    /// Use `MessagePriority::timeout()` for tiered timeouts.
+    async fn send_timeout(
+        &self,
+        cmd: P2PCommand,
+        timeout: Duration,
+    ) -> Result<(), mpsc::error::SendError<P2PCommand>>;
 }
 
 /// Real P2P sender that wraps the actual mpsc channel.
@@ -240,6 +311,7 @@ impl RealP2PSender {
     }
 }
 
+#[async_trait::async_trait]
 impl P2PSender for RealP2PSender {
     fn try_send(&self, cmd: P2PCommand) -> Result<(), mpsc::error::TrySendError<P2PCommand>> {
         match self.tx.try_send(cmd) {
@@ -259,6 +331,37 @@ impl P2PSender for RealP2PSender {
                     "P2P channel send failed"
                 );
                 Err(e)
+            }
+        }
+    }
+
+    async fn send_timeout(
+        &self,
+        cmd: P2PCommand,
+        timeout: Duration,
+    ) -> Result<(), mpsc::error::SendError<P2PCommand>> {
+        let cmd_clone = cmd.clone();
+        match tokio::time::timeout(timeout, self.tx.send(cmd)).await {
+            Ok(result) => {
+                if result.is_ok() {
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.increment_sent();
+                    }
+                } else if let Some(ref metrics) = self.metrics {
+                    metrics.increment_dropped();
+                }
+                result
+            }
+            Err(_) => {
+                if let Some(ref metrics) = self.metrics {
+                    metrics.increment_dropped();
+                }
+                warn!(
+                    timeout_ms = timeout.as_millis(),
+                    metrics_dropped = self.metrics.as_ref().map(|m| m.dropped_count()).unwrap_or(0),
+                    "P2P channel send timeout"
+                );
+                Err(mpsc::error::SendError(cmd_clone))
             }
         }
     }
@@ -310,6 +413,7 @@ impl Default for MockP2PSender {
 }
 
 #[cfg(test)]
+#[async_trait::async_trait]
 impl P2PSender for MockP2PSender {
     fn try_send(&self, cmd: P2PCommand) -> Result<(), mpsc::error::TrySendError<P2PCommand>> {
         if let Some(err) = self.next_error.lock().unwrap().take() {
@@ -318,6 +422,15 @@ impl P2PSender for MockP2PSender {
             self.sent.lock().unwrap().push(cmd);
             Ok(())
         }
+    }
+
+    async fn send_timeout(
+        &self,
+        cmd: P2PCommand,
+        _timeout: Duration,
+    ) -> Result<(), mpsc::error::SendError<P2PCommand>> {
+        self.sent.lock().unwrap().push(cmd);
+        Ok(())
     }
 }
 
