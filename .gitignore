@@ -27,3 +27,9 @@ Thumbs.db
 /data/
 artifacts/
 .sisyphus/
+# Factory tool files
+.factory/
+
+# Temp diff files
+pr_diff_full.txt
+pr_diff*.txt
