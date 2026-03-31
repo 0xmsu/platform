@@ -484,6 +484,10 @@ async fn main() -> Result<()> {
     // Create event channel for network events
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<NetworkEvent>(4096);
 
+    // Extract channel capacities before p2p_config is moved
+    let p2p_channel_capacity = p2p_config.p2p_channel_capacity;
+    let rpc_p2p_channel_capacity = p2p_config.rpc_p2p_channel_capacity;
+
     // Initialize P2P network
     let network = Arc::new(P2PNetwork::new(
         keypair.clone(),
@@ -498,7 +502,7 @@ async fn main() -> Result<()> {
 
     // Create command channel for P2P network
     let (p2p_cmd_tx, p2p_cmd_rx) =
-        tokio::sync::mpsc::channel::<platform_p2p_consensus::P2PCommand>(4096);
+        tokio::sync::mpsc::channel::<platform_p2p_consensus::P2PCommand>(p2p_channel_capacity);
 
     let p2p_sender: Arc<dyn platform_p2p_consensus::P2PSender> = Arc::new(
         platform_p2p_consensus::RealP2PSender::new(p2p_cmd_tx.clone())
@@ -812,7 +816,7 @@ async fn main() -> Result<()> {
 
     // Create channel for RPC -> P2P communication
     let (rpc_p2p_tx, mut rpc_p2p_rx) =
-        tokio::sync::mpsc::channel::<platform_rpc::RpcP2PCommand>(64);
+        tokio::sync::mpsc::channel::<platform_rpc::RpcP2PCommand>(rpc_p2p_channel_capacity);
 
     // Channel for spawned threads to request immediate core state persistence.
     // This avoids losing state changes (e.g. route registration) if the validator

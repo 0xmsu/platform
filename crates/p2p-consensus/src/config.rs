@@ -44,6 +44,15 @@ pub struct P2PConfig {
     pub max_peers: usize,
     /// Whether this node is a bootnode
     pub is_bootnode: bool,
+    /// Channel capacity for P2P command messages
+    /// Default: 4096 (matches prior behavior)
+    pub p2p_channel_capacity: usize,
+    /// Channel capacity for heartbeat messages (future: separate heartbeat channel)
+    /// Default: 256
+    pub heartbeat_channel_capacity: usize,
+    /// Channel capacity for RPC to P2P communication
+    /// Default: 64 (matches prior behavior)
+    pub rpc_p2p_channel_capacity: usize,
 }
 
 /// Default P2P port
@@ -67,6 +76,9 @@ impl Default for P2PConfig {
             connection_timeout_secs: 30,
             max_peers: 64,
             is_bootnode: false,
+            p2p_channel_capacity: 4096,
+            heartbeat_channel_capacity: 256,
+            rpc_p2p_channel_capacity: 64,
         }
     }
 }
@@ -129,6 +141,9 @@ impl P2PConfig {
             connection_timeout_secs: 10,
             max_peers: 32,
             is_bootnode: false,
+            p2p_channel_capacity: 4096,
+            heartbeat_channel_capacity: 256,
+            rpc_p2p_channel_capacity: 64,
         }
     }
 
@@ -153,6 +168,9 @@ impl P2PConfig {
             connection_timeout_secs: 30,
             max_peers: 64,
             is_bootnode: false,
+            p2p_channel_capacity: 4096,
+            heartbeat_channel_capacity: 256,
+            rpc_p2p_channel_capacity: 64,
         }
     }
 }
