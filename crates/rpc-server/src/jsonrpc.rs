@@ -1169,10 +1169,17 @@ impl RpcHandler {
                 }
             } else {
                 // Search by name in wasm_challenge_configs
-                let found = chain
+                // Find ALL matches and pick the one with routes registered
+                let all_matches: Vec<_> = chain
                     .wasm_challenge_configs
                     .values()
-                    .find(|c| c.name == challenge_id);
+                    .filter(|c| c.name == challenge_id)
+                    .collect();
+
+                // Prefer the one with routes registered (emission > 0)
+                let found = all_matches.iter().find(|c| {
+                    chain.challenge_routes.contains_key(&c.challenge_id)
+                }).or_else(|| all_matches.first());
 
                 if let Some(config) = found {
                     (
