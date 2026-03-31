@@ -51,7 +51,7 @@ pub struct P2PConfig {
     /// Default: 256
     pub heartbeat_channel_capacity: usize,
     /// Channel capacity for RPC to P2P communication
-    /// Default: 64 (matches prior behavior)
+    /// Default: 256 (4x increase from 64 to reduce RPC bottleneck)
     pub rpc_p2p_channel_capacity: usize,
 }
 
@@ -78,7 +78,7 @@ impl Default for P2PConfig {
             is_bootnode: false,
             p2p_channel_capacity: 16384, // 4x increase for burst absorption
             heartbeat_channel_capacity: 256,
-            rpc_p2p_channel_capacity: 64,
+            rpc_p2p_channel_capacity: 256, // 4x increase from 64 to reduce RPC bottleneck
         }
     }
 }
@@ -143,7 +143,7 @@ impl P2PConfig {
             is_bootnode: false,
             p2p_channel_capacity: 16384, // 4x increase for burst absorption
             heartbeat_channel_capacity: 256,
-            rpc_p2p_channel_capacity: 64,
+            rpc_p2p_channel_capacity: 256, // 4x increase from 64 to reduce RPC bottleneck
         }
     }
 
@@ -170,7 +170,7 @@ impl P2PConfig {
             is_bootnode: false,
             p2p_channel_capacity: 16384, // 4x increase for burst absorption
             heartbeat_channel_capacity: 256,
-            rpc_p2p_channel_capacity: 64,
+            rpc_p2p_channel_capacity: 256, // 4x increase from 64 to reduce RPC bottleneck
         }
     }
 }
