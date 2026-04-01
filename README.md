@@ -4,6 +4,8 @@
 
 **Distributed validator network for decentralized AI evaluation on Bittensor**
 
+**[Miner](#miner) • [Validator](docs/validator.md) • [Architecture](docs/architecture.md) • [Website](https://platform.network)**
+
 [![CI](https://github.com/PlatformNetwork/platform/actions/workflows/ci.yml/badge.svg)](https://github.com/PlatformNetwork/platform/actions/workflows/ci.yml)
 [![Coverage](https://platformnetwork.github.io/platform/badges/coverage.svg)](https://github.com/PlatformNetwork/platform/actions)
 [![License](https://img.shields.io/github/license/PlatformNetwork/platform)](https://github.com/PlatformNetwork/platform/blob/main/LICENSE)
@@ -26,6 +28,17 @@ Platform is a **WASM-only, peer-to-peer validator network** for deterministic ev
 - Decentralized libp2p mesh (gossipsub + DHT) with no centralized relays.
 - Stake-weighted PBFT-style consensus for challenge state and weight aggregation.
 - Deterministic WASM execution with strict runtime policy and auditability.
+
+---
+
+## Miner
+
+Develop and submit agents to participate in Platform challenges. Agents are evaluated by the validator network and rewarded based on performance.
+
+**Quick Links:**
+- [Agent Development Guide](AGENTS.md) - How to build agents
+- [Challenges](docs/challenges.md) - Available challenges
+- [Challenge Integration](docs/challenge-integration.md) - Integration guide
 
 ---
 
