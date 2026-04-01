@@ -725,6 +725,8 @@ pub struct P2PNetwork {
     seen_nonces: RwLock<HashMap<Hotkey, HashMap<u64, i64>>>,
     /// Message timestamps for sliding window rate limiting (hotkey -> recent message timestamps in ms)
     message_timestamps: RwLock<HashMap<Hotkey, VecDeque<i64>>>,
+    /// Counter for tracking heartbeat message rejections
+    heartbeat_rejections_total: AtomicU64,
 }
 
 impl P2PNetwork {
@@ -763,6 +765,7 @@ impl P2PNetwork {
             ),
             seen_nonces: RwLock::new(HashMap::new()),
             message_timestamps: RwLock::new(HashMap::new()),
+            heartbeat_rejections_total: AtomicU64::new(0),
         })
     }
 
@@ -795,6 +798,15 @@ impl P2PNetwork {
     /// to achieve consensus on proposals.
     pub fn has_min_peers(&self, min_required: usize) -> bool {
         self.connected_peer_count() >= min_required
+    }
+
+
+    /// Get the total count of heartbeat message rejections
+    ///
+    /// This metric tracks how many heartbeat messages have been rejected
+    /// due to validation failures, rate limiting, or other errors.
+    pub fn heartbeat_rejections_total(&self) -> u64 {
+        self.heartbeat_rejections_total.load(Ordering::Relaxed)
     }
 
     /// Create gossipsub behaviour
@@ -1481,17 +1493,35 @@ impl P2PNetwork {
                     }
                 }
                 Err(e) => {
-                    // Try to extract hotkey from message for debugging
-                    let hotkey = bincode::deserialize::<SignedP2PMessage>(&message.data)
-                        .ok()
+                    // Try to extract hotkey from message and check type
+                    let deserialized = bincode::deserialize::<SignedP2PMessage>(&message.data).ok();
+                    let hotkey = deserialized
+                        .as_ref()
                         .map(|m| m.signer.to_ss58())
                         .unwrap_or_else(|| "unknown".to_string());
-                    debug!(
-                        source = %propagation_source,
-                        hotkey = %hotkey,
-                        error = %e,
-                        "Failed to process gossipsub message"
-                    );
+                    
+                    // Check if this is a heartbeat message for specialized warning
+                    let is_heartbeat = deserialized
+                        .as_ref()
+                        .map(|m| matches!(m.message, P2PMessage::Heartbeat(_)))
+                        .unwrap_or(false);
+                    
+                    if is_heartbeat {
+                        warn!(
+                            source = %propagation_source,
+                            hotkey = %hotkey,
+                            error = %e,
+                            "Heartbeat message rejected - validator may become inactive"
+                        );
+                        self.heartbeat_rejections_total.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        debug!(
+                            source = %propagation_source,
+                            hotkey = %hotkey,
+                            error = %e,
+                            "Failed to process gossipsub message"
+                        );
+                    }
                 }
             },
             SwarmEvent::Behaviour(CombinedEvent::Gossipsub(gossipsub::Event::Subscribed {

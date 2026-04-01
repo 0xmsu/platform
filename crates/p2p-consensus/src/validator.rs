@@ -107,11 +107,22 @@ pub struct ValidatorSet {
 impl ValidatorSet {
     /// Create a new validator set
     pub fn new(local_keypair: Keypair, min_stake: u64) -> Self {
+        // Read stale threshold from environment, default to 5 minutes
+        let stale_threshold_ms = std::env::var("VALIDATOR_STALE_THRESHOLD_MS")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(300_000); // Default: 5 minutes
+
+        info!(
+            threshold_ms = stale_threshold_ms,
+            "Validator stale threshold initialized (configurable via VALIDATOR_STALE_THRESHOLD_MS)"
+        );
+
         Self {
             validators: RwLock::new(HashMap::new()),
             min_stake,
             local_keypair,
-            stale_threshold_ms: 90_000, // 90 seconds (3x heartbeat interval)
+            stale_threshold_ms,
             verified_stakes: RwLock::new(HashMap::new()),
         }
     }
@@ -623,5 +634,27 @@ mod tests {
         assert_eq!(updated.state_hash, new_hash);
         assert_eq!(updated.last_sequence, 100);
         assert_eq!(updated.stake, 15_000);
+    }
+
+    #[test]
+    fn test_stale_threshold_from_env() {
+        // Test env var override
+        std::env::set_var("VALIDATOR_STALE_THRESHOLD_MS", "600000");
+        let keypair = create_test_keypair();
+        let set = ValidatorSet::new(keypair, 1000);
+        assert_eq!(set.stale_threshold_ms, 600_000);
+        std::env::remove_var("VALIDATOR_STALE_THRESHOLD_MS");
+
+        // Test default
+        let keypair2 = create_test_keypair();
+        let set2 = ValidatorSet::new(keypair2, 1000);
+        assert_eq!(set2.stale_threshold_ms, 300_000);
+
+        // Test invalid env var falls back to default
+        std::env::set_var("VALIDATOR_STALE_THRESHOLD_MS", "invalid");
+        let keypair3 = create_test_keypair();
+        let set3 = ValidatorSet::new(keypair3, 1000);
+        assert_eq!(set3.stale_threshold_ms, 300_000);
+        std::env::remove_var("VALIDATOR_STALE_THRESHOLD_MS");
     }
 }
