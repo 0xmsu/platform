@@ -5149,6 +5149,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "platform-challenge-sdk",
  "platform-core",
+ "platform-storage",
  "rand 0.8.5",
  "reqwest",
  "serde",

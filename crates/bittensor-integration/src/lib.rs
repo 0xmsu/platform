@@ -18,6 +18,7 @@ mod challenge_weight_collector;
 mod client;
 mod config;
 mod validator_sync;
+mod weight_task;
 mod weights;
 
 #[cfg(test)]
@@ -28,6 +29,7 @@ pub use challenge_weight_collector::*;
 pub use client::*;
 pub use config::*;
 pub use validator_sync::*;
+pub use weight_task::*;
 pub use weights::*;
 
 // Re-export bittensor-rs types for convenience
