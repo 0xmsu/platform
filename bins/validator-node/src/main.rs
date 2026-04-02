@@ -17,8 +17,8 @@ use bittensor_rs::chain::{signer_from_seed, BittensorSigner, ExtrinsicWait};
 use clap::Parser;
 use parking_lot::RwLock;
 use platform_bittensor::{
-    sync_metagraph, BittensorClient, BlockSync, BlockSyncConfig, BlockSyncEvent, Metagraph,
-    Subtensor, SubtensorClient,
+    spawn_weight_task, sync_metagraph, BittensorClient, BlockSync, BlockSyncConfig,
+    BlockSyncEvent, Metagraph, Subtensor, SubtensorClient, WeightTaskHandle,
 };
 use platform_core::{
     checkpoint::{
@@ -31,6 +31,7 @@ use platform_distributed_storage::{
     DistributedStore, DistributedStoreExt, LocalStorageBuilder, PutOptions, StorageKey,
     TrackedStorage, TrackedStorageConfig,
 };
+use platform_storage::WeightSubmissionQueue;
 
 use platform_p2p_consensus::{
     ChainState, ConsensusEngine, EvaluationMessage, EvaluationMetrics, EvaluationRecord,
@@ -400,7 +401,10 @@ async fn main() -> Result<()> {
     let storage = Arc::new(tracked_storage);
     info!("Distributed storage initialized with compression (audit/indexing disabled)");
 
-    // Determine listen address - p2p_port overrides listen_addr if specified
+    let weight_queue = Arc::new(WeightSubmissionQueue::new(local_storage.db())?);
+    info!("Weight submission queue initialized");
+
+    // Determine listen address - p2p-port overrides listen_addr if specified
     let listen_addr = if let Some(port) = args.p2p_port {
         format!("/ip4/0.0.0.0/tcp/{}", port)
     } else if args.with_bootnode {
@@ -536,6 +540,7 @@ async fn main() -> Result<()> {
     let mut subtensor_client: Option<SubtensorClient>;
     let mut bittensor_client_for_metagraph: Option<Arc<BittensorClient>>;
     let mut block_rx: Option<tokio::sync::mpsc::Receiver<BlockSyncEvent>> = None;
+    let mut weight_task_handle: Option<WeightTaskHandle> = None;
 
     if !args.no_bittensor {
         info!("Connecting to Bittensor: {}", args.subtensor_endpoint);
@@ -670,8 +675,20 @@ async fn main() -> Result<()> {
                                 }
                                 client.set_metagraph(mg);
                             }
-                            Err(e) => warn!("Metagraph sync failed: {}", e),
-                        }
+                             Err(e) => warn!("Metagraph sync failed: {}", e),
+                         }
+
+                        let our_uid = client
+                            .metagraph()
+                            .as_ref()
+                            .and_then(|mg| {
+                                let our_ss58 = keypair.ss58_address();
+                                mg.neurons
+                                    .values()
+                                    .find(|n| n.hotkey.to_string() == our_ss58)
+                                    .map(|n| n.uid as u16)
+                            })
+                            .unwrap_or(0);
 
                         subtensor_client = Some(client);
                         bittensor_client_for_metagraph = Some(bittensor_client.clone());
@@ -693,6 +710,18 @@ async fn main() -> Result<()> {
                             block_rx = rx;
                             info!("Block sync started");
                         }
+
+                        let st = subtensor.as_ref().unwrap().clone();
+                        let sig = subtensor_signer.as_ref().unwrap().clone();
+                        weight_task_handle = Some(spawn_weight_task(
+                            weight_queue.clone(),
+                            st,
+                            sig,
+                            args.netuid,
+                            args.version_key,
+                            our_uid,
+                        ));
+                        info!(uid = our_uid, "Weight submission task spawned");
 
                         if endpoint != &args.subtensor_endpoint {
                             warn!(
@@ -1416,6 +1445,7 @@ async fn main() -> Result<()> {
                     &subtensor_endpoint_for_reconnect,
                     &subtensor_state_path_for_reconnect,
                     &mut bittensor_client_for_metagraph,
+                    &weight_task_handle,
                 ).await;
 
                 // On first block after startup, compute weights immediately so
@@ -1464,6 +1494,7 @@ async fn main() -> Result<()> {
                         &subtensor_endpoint_for_reconnect,
                         &subtensor_state_path_for_reconnect,
                         &mut bittensor_client_for_metagraph,
+                        &weight_task_handle,
                     ).await;
                 }
             }
@@ -2304,6 +2335,10 @@ async fn main() -> Result<()> {
                             } else {
                                 info!("Shutdown checkpoint saved successfully");
                             }
+                        }
+
+                        if let Some(ref handle) = weight_task_handle {
+                            handle.shutdown().await;
                         }
                     }
                 ).await;
@@ -4890,23 +4925,14 @@ async fn try_reconnect_subtensor(
     false
 }
 
-fn is_transport_error(err_str: &str) -> bool {
-    err_str.contains("connection closed")
-        || err_str.contains("restart required")
-        || err_str.contains("background task")
-        || err_str.contains("transport")
-        || err_str.contains("Connection refused")
-        || err_str.contains("Broken pipe")
-}
-
 async fn handle_block_event(
     event: BlockSyncEvent,
     subtensor: &mut Option<Arc<Subtensor>>,
     signer: &Option<Arc<BittensorSigner>>,
     client: &Option<SubtensorClient>,
     state_manager: &Arc<StateManager>,
-    netuid: u16,
-    version_key: u64,
+    _netuid: u16,
+    _version_key: u64,
     wasm_executor: &Option<Arc<WasmChallengeExecutor>>,
     _keypair: &Keypair,
     chain_state: &Arc<RwLock<platform_core::ChainState>>,
@@ -4915,6 +4941,7 @@ async fn handle_block_event(
     subtensor_endpoint: &str,
     subtensor_state_path: &Option<std::path::PathBuf>,
     bittensor_client_for_metagraph: &mut Option<Arc<BittensorClient>>,
+    weight_task_handle: &Option<WeightTaskHandle>,
 ) {
     match event {
         BlockSyncEvent::NewBlock { block_number, .. } => {
@@ -5098,455 +5125,50 @@ async fn handle_block_event(
                 return;
             }
 
-            if let (Some(st), Some(sig)) = (subtensor.as_ref(), signer.as_ref()) {
-                let our_uid: u16 = client
-                    .as_ref()
-                    .and_then(|sc| {
-                        let our_ss58 = _keypair.ss58_address();
-                        sc.metagraph().as_ref().and_then(|mg| {
-                            mg.neurons
-                                .values()
-                                .find(|n| n.hotkey.to_string() == our_ss58)
-                                .map(|n| n.uid as u16)
-                        })
-                    })
-                    .unwrap_or(0);
-
-                let mut mechanism_weights: Vec<(u8, Vec<u16>, Vec<u16>)> = Vec::new();
-
-                if let Some(ref executor) = wasm_executor {
-                    let challenges: Vec<(String, u8, f64)> = {
-                        let cs = chain_state.read();
-                        cs.wasm_challenge_configs
-                            .iter()
-                            .filter(|(_, cfg)| cfg.is_active)
-                            .map(|(id, cfg)| {
-                                let mechanism_id = cfg.config.mechanism_id;
-                                let emission_weight = cfg.config.emission_weight;
-                                (id.to_string(), mechanism_id, emission_weight)
-                            })
-                            .collect()
-                    };
-
-                    let block_height = state_manager.apply(|state| state.bittensor_block);
-
-                    for (cid, mechanism_id, emission_weight) in &challenges {
-                        let emission_weight = emission_weight.clamp(0.0, 1.0);
-                        if emission_weight < 0.001 {
-                            debug!(
-                                "Skipping challenge {} (emission_weight={:.4}, effectively zero)",
-                                cid, emission_weight
-                            );
-                            continue;
-                        }
-                        match executor.execute_get_weights_with_block(cid, block_height, epoch) {
-                            Ok(assignments) if !assignments.is_empty() => {
-                                let total_weight: f64 = assignments.iter().map(|a| a.weight).sum();
-
-                                let mut uid_weight_map: std::collections::BTreeMap<u16, f64> =
-                                    std::collections::BTreeMap::new();
-                                let mut assigned_weight: f64 = 0.0;
-
-                                if total_weight > 0.0 {
-                                    for assignment in &assignments {
-                                        let uid = client
-                                            .as_ref()
-                                            .and_then(|c| c.get_uid_for_hotkey(&assignment.hotkey));
-
-                                        if let Some(uid) = uid {
-                                            let normalized = assignment.weight / total_weight;
-                                            let scaled = normalized * emission_weight;
-                                            *uid_weight_map.entry(uid).or_insert(0.0) += scaled;
-                                            assigned_weight += scaled;
-                                        } else {
-                                            warn!(
-                                                "Hotkey {} not found in metagraph, weight goes to burn",
-                                                &assignment.hotkey[..std::cmp::min(16, assignment.hotkey.len())]
-                                            );
-                                        }
-                                    }
-                                }
-
-                                let mut uids: Vec<u16> = Vec::new();
-                                let mut vals: Vec<u16> = Vec::new();
-                                for (uid, w) in &uid_weight_map {
-                                    let weight_u16 = (w * 65535.0).round() as u16;
-                                    if weight_u16 > 0 {
-                                        uids.push(*uid);
-                                        vals.push(weight_u16);
-                                    }
-                                }
-
-                                let burn_weight = 1.0 - assigned_weight;
-                                if burn_weight > 0.001 {
-                                    let burn_u16 = (burn_weight * 65535.0).round() as u16;
-                                    if let Some(pos) = uids.iter().position(|&u| u == 0) {
-                                        vals[pos] = vals[pos].saturating_add(burn_u16);
-                                    } else {
-                                        uids.push(0);
-                                        vals.push(burn_u16);
-                                    }
-                                    debug!("  Burn (UID 0): {:.4} = {}", burn_weight, burn_u16);
-                                }
-
-                                if !uids.is_empty() {
-                                    let max_val = *vals.iter().max().unwrap() as f64;
-                                    if max_val > 0.0 && max_val < 65535.0 {
-                                        vals = vals
-                                            .iter()
-                                            .map(|v| {
-                                                ((*v as f64 / max_val) * 65535.0).round() as u16
-                                            })
-                                            .collect();
-                                    }
-
-                                    info!(
-                                        challenge_id = %cid,
-                                        mechanism_id = mechanism_id,
-                                        emission_weight = emission_weight,
-                                        uid_count = uids.len(),
-                                        "WASM weights collected (max-upscaled)"
-                                    );
-                                    debug!("  UIDs: {:?}, Weights: {:?}", uids, vals);
-                                    mechanism_weights.push((*mechanism_id, uids, vals));
-                                } else {
-                                    warn!(
-                                        "Challenge {} has weights but no UIDs resolved - sending 100% burn",
-                                        cid
-                                    );
-                                    mechanism_weights.push((
-                                        *mechanism_id,
-                                        vec![0u16],
-                                        vec![65535u16],
-                                    ));
-                                }
-                            }
-                            Ok(_) => {
-                                info!("Challenge {} has no weights - sending 100% burn", cid);
-                                mechanism_weights.push((*mechanism_id, vec![0u16], vec![65535u16]));
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "Failed to get weights for {} - sending 100% burn: {}",
-                                    cid, e
-                                );
-                                mechanism_weights.push((*mechanism_id, vec![0u16], vec![65535u16]));
-                            }
-                        }
+            if let Some(ref handle) = weight_task_handle {
+                let weights = match fetch_remote_weights().await {
+                    Ok(remote) if !remote.is_empty() => {
+                        info!(
+                            "Using {} mechanism entries from bootstrap RPC",
+                            remote.len()
+                        );
+                        remote
                     }
-                }
-
-                // Deduplicate by mechanism_id: pick the best (most UIDs) entry per mechanism.
-                let weights_to_submit: Vec<(u8, Vec<u16>, Vec<u16>)> =
-                    if mechanism_weights.is_empty() {
-                        let mechanism_id = {
-                            let cs = chain_state.read();
-                            cs.mechanism_configs.keys().next().copied().unwrap_or(0u8)
-                        };
+                    Ok(_) => {
                         warn!(
                             epoch = epoch,
                             block = block,
-                            "No WASM weights available - submitting burn weights to UID 0"
+                            "Remote weights empty, skipping submission"
                         );
-                        vec![(mechanism_id, vec![0u16], vec![65535u16])]
-                    } else {
-                        use std::collections::BTreeMap;
-                        let mut best_per_mechanism: BTreeMap<u8, (Vec<u16>, Vec<u16>)> =
-                            BTreeMap::new();
-                        for (mid, uids, vals) in &mechanism_weights {
-                            let is_burn_only = uids.len() == 1 && uids[0] == 0;
-                            let existing = best_per_mechanism.get(mid);
-                            let replace = match existing {
-                                None => true,
-                                Some((ex_uids, _)) => {
-                                    let ex_is_burn = ex_uids.len() == 1 && ex_uids[0] == 0;
-                                    if is_burn_only && !ex_is_burn {
-                                        false
-                                    } else if !is_burn_only && ex_is_burn {
-                                        true
-                                    } else {
-                                        uids.len() > ex_uids.len()
-                                    }
-                                }
-                            };
-                            if replace {
-                                best_per_mechanism.insert(*mid, (uids.clone(), vals.clone()));
-                            }
-                        }
-                        let mut result = Vec::new();
-                        for (mid, (uids, vals)) in best_per_mechanism {
-                            info!(
-                                "Selected weights for mechanism {}: {} UIDs",
-                                mid,
-                                uids.len()
-                            );
-                            debug!("  UIDs: {:?}, Weights: {:?}", uids, vals);
-                            result.push((mid, uids, vals));
-                        }
-                        if result.is_empty() {
-                            let mechanism_id = {
-                                let cs = chain_state.read();
-                                cs.mechanism_configs.keys().next().copied().unwrap_or(0u8)
-                            };
-                            vec![(mechanism_id, vec![0u16], vec![65535u16])]
-                        } else {
-                            result
-                        }
-                    };
-
-                // ALL validators (including bootstrap) fetch weights from the
-                // bootstrap RPC to guarantee everyone submits identical weights.
-                let weights_to_submit = {
-                    info!("Fetching weights from bootstrap validator RPC");
-                    match fetch_remote_weights().await {
-                        Ok(remote) if !remote.is_empty() => {
-                            info!(
-                                "Using {} mechanism entries from bootstrap RPC",
-                                remote.len()
-                            );
-                            remote
-                        }
-                        Ok(_) => {
-                            warn!(
-                                epoch = epoch,
-                                block = block,
-                                "Remote weights empty, falling back to locally computed"
-                            );
-                            weights_to_submit
-                        }
-                        Err(e) => {
-                            warn!(
-                                epoch = epoch,
-                                block = block,
-                                error = %e,
-                                "Failed to fetch remote weights, falling back to locally computed"
-                            );
-                            weights_to_submit
-                        }
+                        return;
+                    }
+                    Err(e) => {
+                        warn!(
+                            epoch = epoch,
+                            block = block,
+                            error = %e,
+                            "Failed to fetch remote weights, skipping submission"
+                        );
+                        return;
                     }
                 };
 
-                // Store computed weights in chain state for the subnet_getWeights RPC
                 {
                     let mut cs = chain_state.write();
-                    cs.last_computed_weights = weights_to_submit.clone();
+                    cs.last_computed_weights = weights.clone();
                 }
 
-                let total_mechanisms = weights_to_submit.len();
-                let mut succeeded_mechanisms: Vec<u8> = Vec::new();
-                let mut failed_mechanisms: Vec<u8> = Vec::new();
-                let mut needs_reconnect = false;
-                let mut failed_submissions: Vec<(u8, Vec<u16>, Vec<u16>)> = Vec::new();
-
-                for (mechanism_id, uids, weights) in &weights_to_submit {
-                    // Per-mechanism rate limit check
-                    match st.can_set_weights(netuid, our_uid, *mechanism_id).await {
-                        Ok(false) => {
-                            warn!(
-                                epoch = epoch,
-                                mechanism_id = mechanism_id,
-                                uid = our_uid,
-                                "Rate limit: cannot set weights yet for mechanism, will retry next window"
-                            );
-                            failed_mechanisms.push(*mechanism_id);
-                            continue;
-                        }
-                        Err(e) => {
-                            warn!(
-                                mechanism_id = mechanism_id,
-                                error = %e,
-                                "Failed to check rate limit, proceeding anyway"
-                            );
-                        }
-                        Ok(true) => {}
-                    }
-
-                    info!(
-                        "Submitting weights for mechanism {} ({} UIDs)",
-                        mechanism_id,
-                        uids.len()
-                    );
-                    match st
-                        .set_mechanism_weights(
-                            sig,
-                            netuid,
-                            *mechanism_id,
-                            uids,
-                            weights,
-                            version_key,
-                            ExtrinsicWait::Finalized,
-                        )
-                        .await
-                    {
-                        Ok(resp) if resp.success => {
-                            warn!(
-                                epoch = epoch,
-                                mechanism_id = mechanism_id,
-                                tx_hash = ?resp.tx_hash,
-                                uid_count = uids.len(),
-                                "Weight submission SUCCESS"
-                            );
-                            succeeded_mechanisms.push(*mechanism_id);
-                        }
-                        Ok(resp) => {
-                            error!(
-                                epoch = epoch,
-                                mechanism_id = mechanism_id,
-                                message = %resp.message,
-                                "Weight submission returned non-success response, will retry"
-                            );
-                            failed_mechanisms.push(*mechanism_id);
-                            failed_submissions.push((*mechanism_id, uids.clone(), weights.clone()));
-                        }
-                        Err(e) => {
-                            let err_str = format!("{}", e);
-                            if err_str.contains("Priority is too low") || err_str.contains("1010") {
-                                warn!(
-                                    epoch = epoch,
-                                    mechanism_id = mechanism_id,
-                                    error = %err_str,
-                                    "Transaction priority conflict, will retry next window (NOT marking epoch as done)"
-                                );
-                                failed_mechanisms.push(*mechanism_id);
-                            } else if is_transport_error(&err_str) {
-                                error!(
-                                    epoch = epoch,
-                                    mechanism_id = mechanism_id,
-                                    error = %e,
-                                    "Weight submission transport error, will reconnect and retry"
-                                );
-                                needs_reconnect = true;
-                                failed_mechanisms.push(*mechanism_id);
-                                failed_submissions.push((
-                                    *mechanism_id,
-                                    uids.clone(),
-                                    weights.clone(),
-                                ));
-                            } else if err_str.contains("HotKeyNotRegisteredInSubNet") {
-                                error!(
-                                    epoch = epoch,
-                                    mechanism_id = mechanism_id,
-                                    error = %err_str,
-                                    "Hotkey not registered on subnet - check registration status"
-                                );
-                                failed_mechanisms.push(*mechanism_id);
-                            } else if err_str.contains("CommittingWeightsTooFast") {
-                                warn!(
-                                    epoch = epoch,
-                                    mechanism_id = mechanism_id,
-                                    error = %err_str,
-                                    "Committing weights too fast (rate limited by chain), will retry next window"
-                                );
-                                failed_mechanisms.push(*mechanism_id);
-                            } else {
-                                error!(
-                                    epoch = epoch,
-                                    mechanism_id = mechanism_id,
-                                    error = %e,
-                                    "Weight submission failed (unknown error), will retry next window"
-                                );
-                                failed_mechanisms.push(*mechanism_id);
-                            }
-                        }
-                    }
-                }
-
-                // Drop immutable borrows of subtensor (st, sig) before reconnecting
-                drop(weights_to_submit);
-
-                // Reconnect and retry transport failures
-                if needs_reconnect && !failed_submissions.is_empty() {
-                    if try_reconnect_subtensor(subtensor, subtensor_endpoint, subtensor_state_path)
-                        .await
-                    {
-                        if let (Some(new_st), Some(sig)) = (subtensor.as_ref(), signer.as_ref()) {
-                            for (mechanism_id, uids, weights) in &failed_submissions {
-                                warn!(
-                                    epoch = epoch,
-                                    mechanism_id = mechanism_id,
-                                    "Retrying weight submission after reconnect"
-                                );
-                                match new_st
-                                    .set_mechanism_weights(
-                                        sig,
-                                        netuid,
-                                        *mechanism_id,
-                                        uids,
-                                        weights,
-                                        version_key,
-                                        ExtrinsicWait::Finalized,
-                                    )
-                                    .await
-                                {
-                                    Ok(resp) if resp.success => {
-                                        warn!(
-                                            epoch = epoch,
-                                            mechanism_id = mechanism_id,
-                                            tx_hash = ?resp.tx_hash,
-                                            "Weight submission SUCCESS after reconnect"
-                                        );
-                                        succeeded_mechanisms.push(*mechanism_id);
-                                        failed_mechanisms.retain(|m| m != mechanism_id);
-                                    }
-                                    Ok(resp) => {
-                                        error!(
-                                            epoch = epoch,
-                                            mechanism_id = mechanism_id,
-                                            message = %resp.message,
-                                            "Weight submission non-success after reconnect"
-                                        );
-                                    }
-                                    Err(e2) => {
-                                        error!(
-                                            epoch = epoch,
-                                            mechanism_id = mechanism_id,
-                                            error = %e2,
-                                            "Weight submission failed even after reconnect"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        error!(
-                            epoch = epoch,
-                            "Subtensor reconnect failed, weight submissions lost for this window"
-                        );
-                    }
-                }
-
-                // Only mark epoch as submitted if ALL mechanisms succeeded
-                if !succeeded_mechanisms.is_empty() && failed_mechanisms.is_empty() {
-                    *last_weight_submission_epoch = epoch;
-                    warn!(
-                        epoch = epoch,
-                        succeeded = succeeded_mechanisms.len(),
-                        total = total_mechanisms,
-                        "All weight submissions succeeded, epoch marked complete"
-                    );
-                } else if !succeeded_mechanisms.is_empty() {
-                    // Partial success: do NOT mark epoch as done so failed mechanisms can retry
-                    warn!(
-                        epoch = epoch,
-                        succeeded = succeeded_mechanisms.len(),
-                        failed = failed_mechanisms.len(),
-                        total = total_mechanisms,
-                        failed_ids = ?failed_mechanisms,
-                        "Partial weight submission: NOT marking epoch as done, will retry failed mechanisms"
-                    );
+                if let Err(e) = handle.enqueue(epoch, weights).await {
+                    error!(epoch = epoch, error = %e, "Failed to enqueue weights");
                 } else {
-                    error!(
-                        epoch = epoch,
-                        total = total_mechanisms,
-                        failed_ids = ?failed_mechanisms,
-                        "All weight submissions failed for this epoch, will retry next window"
-                    );
+                    info!(epoch = epoch, "Weights enqueued for submission");
+                    *last_weight_submission_epoch = epoch;
                 }
             } else {
                 error!(
                     epoch = epoch,
                     block = block,
-                    "No Subtensor/signer available - cannot submit weights"
+                    "No weight task handle - cannot submit weights"
                 );
             }
         }
