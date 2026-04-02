@@ -57,6 +57,10 @@ path = "channel_overflow_test.rs"
 name = "retry_queue_integration_test"
 path = "retry_queue_integration_test.rs"
 
+[[test]]
+name = "weight_queue_tests"
+path = "weight_queue_tests.rs"
+
 [dependencies]
 platform-core = { path = "../crates/core" }
 platform-storage = { path = "../crates/storage" }
