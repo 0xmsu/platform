@@ -34,7 +34,7 @@ use platform_distributed_storage::{
 
 use platform_p2p_consensus::{
     ChainState, ConsensusEngine, EvaluationMessage, EvaluationMetrics, EvaluationRecord,
-    HeartbeatMessage, JobRecord, JobStatus, NetworkEvent, P2PConfig, P2PMessage, P2PNetwork,
+    HeartbeatMessage, JobRecord, JobStatus, MessagePriority, NetworkEvent, P2PConfig, P2PMessage, P2PNetwork,
     StateManager, StorageProposal, StorageVoteMessage, TaskProgressRecord, ValidatorRecord,
     ValidatorSet,
 };
@@ -1512,7 +1512,7 @@ async fn main() -> Result<()> {
                         };
 
                         let msg = P2PMessage::ChallengeUpdate(update_msg);
-                        if let Err(e) = p2p_broadcast_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(msg)) {
+                        if let Err(e) = p2p_broadcast_tx.send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(msg), MessagePriority::Low.timeout()).await {
                             error!("Failed to broadcast sudo action: {}", e);
                         } else {
                             info!("Sudo action broadcast to P2P network");
@@ -1543,7 +1543,7 @@ async fn main() -> Result<()> {
                         };
 
                         let msg = P2PMessage::ChallengeUpdate(update_msg);
-                        if let Err(e) = p2p_broadcast_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(msg)) {
+                        if let Err(e) = p2p_broadcast_tx.send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(msg), MessagePriority::Low.timeout()).await {
                             error!("Failed to broadcast ChallengeUpdate: {}", e);
                         } else {
                             info!(
@@ -1582,7 +1582,7 @@ async fn main() -> Result<()> {
                                 );
 
                                 if let Err(e) = p2p_broadcast_tx
-                                    .try_send(platform_p2p_consensus::P2PCommand::Broadcast(mutation_msg))
+                                    .send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(mutation_msg), MessagePriority::High.timeout()).await
                                 {
                                     warn!(error = %e, "Failed to broadcast StateMutationProposal");
                                 }
@@ -1836,7 +1836,7 @@ async fn main() -> Result<()> {
                         },
                     });
 
-                    if let Err(e) = p2p_broadcast_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(heartbeat)) {
+                    if let Err(e) = p2p_broadcast_tx.send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(heartbeat), MessagePriority::Medium.timeout()).await {
                         warn!("Failed to broadcast heartbeat: {}", e);
                     }
 
@@ -2171,7 +2171,7 @@ async fn main() -> Result<()> {
                                             }
                                         );
 
-                                        if let Err(e) = p2p_broadcast_tx.try_send(platform_p2p_consensus::P2PCommand::Broadcast(proposal_msg)) {
+                                        if let Err(e) = p2p_broadcast_tx.send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(proposal_msg), MessagePriority::Low.timeout()).await {
                                             warn!(error = %e, "Failed to broadcast sync proposal");
                                         }
                                     }
@@ -2676,7 +2676,7 @@ async fn handle_network_event(
                         );
 
                         if let Err(e) =
-                            p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(req))
+                            p2p_sender.send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(req), MessagePriority::Low.timeout()).await
                         {
                             warn!(error = %e, "Failed to send core state request");
                         }
@@ -2910,7 +2910,7 @@ async fn handle_network_event(
                             );
 
                             if let Err(e) = p2p_sender
-                                .try_send(platform_p2p_consensus::P2PCommand::Broadcast(response))
+                                .send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(response), MessagePriority::Low.timeout()).await
                             {
                                 warn!(error = %e, "Failed to send storage data response");
                             } else {
@@ -3072,7 +3072,7 @@ async fn handle_network_event(
                         },
                     );
                     if let Err(e) =
-                        p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(resp))
+                        p2p_sender.send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(resp), MessagePriority::Low.timeout()).await
                     {
                         warn!(error = %e, "Failed to send leaderboard response");
                     }
@@ -3574,7 +3574,7 @@ async fn handle_network_event(
                     }
 
                     if let Err(e) =
-                        p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg))
+                        p2p_sender.send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg), MessagePriority::Low.timeout()).await
                     {
                         warn!(error = %e, "Failed to broadcast storage vote");
                     }
@@ -3776,7 +3776,7 @@ async fn handle_network_event(
                             );
 
                             if let Err(e) = p2p_sender
-                                .try_send(platform_p2p_consensus::P2PCommand::Broadcast(req))
+                                .send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(req), MessagePriority::Low.timeout()).await
                             {
                                 warn!(error = %e, "Failed to send storage sync request");
                             }
@@ -3847,7 +3847,7 @@ async fn handle_network_event(
                     );
 
                     if let Err(e) =
-                        p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg))
+                        p2p_sender.send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(vote_msg), MessagePriority::High.timeout()).await
                     {
                         warn!(error = %e, "Failed to broadcast state mutation vote");
                     }
@@ -4032,7 +4032,7 @@ async fn handle_network_event(
                     );
 
                     if let Err(e) =
-                        p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(response))
+                        p2p_sender.send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(response), MessagePriority::Low.timeout()).await
                     {
                         warn!(error = %e, "Failed to send core state response");
                     }
@@ -4171,8 +4171,8 @@ async fn handle_network_event(
                     );
 
                     if let Err(e) =
-                        p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(req))
-                    {
+                            p2p_sender.send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(req), MessagePriority::Low.timeout()).await
+                        {
                         warn!(error = %e, "Failed to send storage sync request");
                     }
                 }
@@ -4283,7 +4283,7 @@ async fn handle_network_event(
                                 );
 
                                 if let Err(e) = p2p_sender
-                                    .try_send(platform_p2p_consensus::P2PCommand::Broadcast(resp))
+                                    .send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(resp), MessagePriority::Low.timeout()).await
                                 {
                                     warn!(error = %e, "Failed to send storage sync response");
                                 } else {
@@ -5812,7 +5812,7 @@ async fn process_wasm_evaluations(
             signature,
             timestamp,
         });
-        if let Err(e) = p2p_sender.try_send(platform_p2p_consensus::P2PCommand::Broadcast(eval_msg))
+        if let Err(e) = p2p_sender.send_timeout(platform_p2p_consensus::P2PCommand::Broadcast(eval_msg), MessagePriority::Low.timeout()).await
         {
             warn!(
                 submission_id = %submission_id,

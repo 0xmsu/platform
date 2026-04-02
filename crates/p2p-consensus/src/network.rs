@@ -465,6 +465,9 @@ impl RealP2PSender {
                 Err(e) => {
                     let next_attempt = attempt + 1;
                     if !self.retry_queue.enqueue(cmd, next_attempt) {
+                        if let Some(ref metrics) = self.metrics {
+                            metrics.increment_dropped();
+                        }
                         error!(
                             attempt = next_attempt,
                             error = %e,

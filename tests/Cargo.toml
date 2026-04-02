@@ -53,6 +53,10 @@ required-features = ["wasm-tests"]
 name = "channel_overflow_test"
 path = "channel_overflow_test.rs"
 
+[[test]]
+name = "retry_queue_integration_test"
+path = "retry_queue_integration_test.rs"
+
 [dependencies]
 platform-core = { path = "../crates/core" }
 platform-storage = { path = "../crates/storage" }
