@@ -55,6 +55,7 @@ pub mod dynamic;
 pub mod metadata;
 pub mod migration;
 pub mod optimized;
+pub mod pending_weights;
 pub mod types;
 
 pub use distributed::*;
@@ -62,6 +63,7 @@ pub use dynamic::*;
 pub use metadata::*;
 pub use migration::*;
 pub use optimized::*;
+pub use pending_weights::*;
 pub use types::*;
 
 use platform_core::{
