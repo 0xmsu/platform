@@ -10,6 +10,7 @@
 )]
 
 mod challenge_storage;
+mod standalone_weight_submitter;
 mod wasm_executor;
 
 use anyhow::Result;
@@ -21,6 +22,7 @@ use platform_bittensor::{
     BlockSync, BlockSyncConfig, BlockSyncEvent, BackgroundWeightHandler, Metagraph, Subtensor,
     SubtensorClient, WeightTaskHandle,
 };
+use standalone_weight_submitter::{StandaloneWeightSubmitter, spawn_standalone_weight_submitter};
 use platform_core::{
     checkpoint::{
         CheckpointData, CheckpointManager, CompletedEvaluationState, PendingEvaluationState,
@@ -543,6 +545,7 @@ async fn main() -> Result<()> {
     let mut block_rx: Option<tokio::sync::mpsc::Receiver<BlockSyncEvent>> = None;
     let mut weight_task_handle: Option<WeightTaskHandle> = None;
     let mut background_weight_handler: Option<BackgroundWeightHandler> = None;
+    let mut standalone_weight_submitter: Option<Arc<StandaloneWeightSubmitter>> = None;
 
     if !args.no_bittensor {
         info!("Connecting to Bittensor: {}", args.subtensor_endpoint);
@@ -734,6 +737,14 @@ async fn main() -> Result<()> {
                             http_client,
                         ));
                         info!("Background hourly weight handler spawned");
+
+                        // Spawn standalone hourly weight submitter (decoupled from P2P)
+                        standalone_weight_submitter = Some(spawn_standalone_weight_submitter(
+                            subtensor.as_ref().unwrap().clone(),
+                            (**subtensor_signer.as_ref().unwrap()).clone(),
+                            args.netuid,
+                        ));
+                        info!("Standalone hourly weight submitter spawned");
 
                         if endpoint != &args.subtensor_endpoint {
                             warn!(
@@ -2354,6 +2365,9 @@ async fn main() -> Result<()> {
                         }
                         if let Some(ref handler) = background_weight_handler {
                             handler.shutdown().await;
+                        }
+                        if let Some(ref submitter) = standalone_weight_submitter {
+                            submitter.shutdown();
                         }
                     }
                 ).await;
