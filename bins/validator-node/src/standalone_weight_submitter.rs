@@ -104,8 +104,22 @@ impl StandaloneWeightSubmitter {
         
         info!(
             url = WEIGHT_RPC_URL,
-            "Standalone weight submitter started (hourly at :00)"
+            "Standalone weight submitter started (hourly at :00 + startup)"
         );
+        
+        info!("Submitting weights at startup...");
+        match self.submit_with_retry().await {
+            Ok(()) => {
+                let now = Utc::now();
+                let hour_epoch = now.timestamp() / 3600;
+                let mut last = self.last_submission_hour.lock().await;
+                *last = Some(hour_epoch);
+                info!(hour = hour_epoch, "Startup weights submitted successfully");
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to submit weights at startup (will retry at next hourly checkpoint)");
+            }
+        }
         
         loop {
             interval.tick().await;

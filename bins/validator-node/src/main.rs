@@ -543,6 +543,7 @@ async fn main() -> Result<()> {
     let mut subtensor_client: Option<SubtensorClient>;
     let mut bittensor_client_for_metagraph: Option<Arc<BittensorClient>>;
     let mut block_rx: Option<tokio::sync::mpsc::Receiver<BlockSyncEvent>> = None;
+    let block_sync_netuid: u16 = args.netuid;
     let mut weight_task_handle: Option<WeightTaskHandle> = None;
     let mut background_weight_handler: Option<BackgroundWeightHandler> = None;
     let mut standalone_weight_submitter: Option<Arc<StandaloneWeightSubmitter>> = None;
@@ -2324,6 +2325,33 @@ async fn main() -> Result<()> {
                             }
                             Err(e) => {
                                 error!("Failed to recreate Bittensor client during health-check: {}", e);
+                            }
+                        }
+                        // Recreate BlockSync to get fresh block events
+                        info!("Recreating BlockSync with fresh connection...");
+                        let mut sync = BlockSync::new(BlockSyncConfig {
+                            netuid: block_sync_netuid,
+                            ..Default::default()
+                        });
+                        let rx = sync.take_event_receiver();
+
+                        match bittensor_client_for_metagraph.as_ref() {
+                            Some(client) => {
+                                if let Err(e) = sync.connect(client.clone()).await {
+                                    error!("Failed to reconnect BlockSync: {}", e);
+                                } else {
+                                    tokio::spawn(async move {
+                                        if let Err(e) = sync.start().await {
+                                            error!("Block sync error after reconnect: {}", e);
+                                        }
+                                    });
+                                    block_rx = rx;
+                                    last_block_event_time = std::time::Instant::now();
+                                    info!("BlockSync reconnected successfully");
+                                }
+                            }
+                            None => {
+                                warn!("No bittensor_client_for_metagraph available for BlockSync reconnection");
                             }
                         }
                     }
