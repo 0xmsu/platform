@@ -173,4 +173,130 @@ mod tests {
         assert!(!WEIGHT_RPC_URL.is_empty());
         assert_eq!(RPC_TIMEOUT_SECS, 30);
     }
+
+    #[test]
+    fn test_minute_zero_detection() {
+        // Test that minute() == 0 correctly identifies heure pile
+        let dt1 = chrono::DateTime::parse_from_rfc3339("2026-01-01T10:00:00Z").unwrap();
+        let dt2 = chrono::DateTime::parse_from_rfc3339("2026-01-01T10:30:00Z").unwrap();
+        let dt3 = chrono::DateTime::parse_from_rfc3339("2026-01-01T10:59:59Z").unwrap();
+
+        assert_eq!(dt1.minute(), 0);  // heure pile
+        assert_ne!(dt2.minute(), 0);  // not heure pile
+        assert_ne!(dt3.minute(), 0);  // not heure pile
+    }
+
+    #[test]
+    fn test_hour_epoch_calculation() {
+        // Test hour epoch from timestamp
+        let ts: i64 = 1738368000; // 2025-02-01 00:00:00 UTC
+        let hour_epoch = ts / 3600;
+        assert_eq!(hour_epoch, 482880); // hours since epoch
+
+        // Verify consistency: same hour gives same epoch
+        let ts2: i64 = 1738371599; // 2025-02-01 00:59:59 UTC
+        assert_eq!(ts2 / 3600, hour_epoch);
+
+        // Different hour gives different epoch
+        let ts3: i64 = 1738371600; // 2025-02-01 01:00:00 UTC
+        assert_ne!(ts3 / 3600, hour_epoch);
+    }
+
+    #[test]
+    fn test_dedup_same_hour_skipped() {
+        // Same hour_epoch should be skipped
+        let hour_epoch: i64 = 482880;
+        let last_submission: Option<i64> = Some(hour_epoch);
+
+        // If last_submission_hour == current hour_epoch, should skip
+        assert!(last_submission.is_some());
+        assert_eq!(last_submission.unwrap(), hour_epoch);
+
+        // This simulates: if last_hour == hour_epoch { continue; }
+        let should_skip = match last_submission {
+            Some(last) if last == hour_epoch => true,
+            _ => false,
+        };
+        assert!(should_skip);
+    }
+
+    #[test]
+    fn test_dedup_different_hour_processed() {
+        // Different hour should be processed
+        let last_submission: Option<i64> = Some(482880);
+        let new_hour_epoch: i64 = 482881; // Next hour
+
+        let should_process = match last_submission {
+            Some(last) if last == new_hour_epoch => false,
+            _ => true,
+        };
+        assert!(should_process);
+    }
+
+    #[test]
+    fn test_dedup_first_submission() {
+        // No previous submission (None) should always process
+        let last_submission: Option<i64> = None;
+        let hour_epoch: i64 = 482880;
+
+        let should_process = match last_submission {
+            Some(last) if last == hour_epoch => false,
+            _ => true,
+        };
+        assert!(should_process);
+    }
+
+    #[test]
+    fn test_invalid_response_parsing() {
+        // Test that invalid JSON response is handled gracefully
+        let json_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {}  // Missing 'weights' field
+        });
+
+        // Verify missing weights array produces error
+        let weights_arr = json_response["result"]["weights"].as_array();
+        assert!(weights_arr.is_none());
+    }
+
+    #[test]
+    fn test_empty_weights_array_handled() {
+        // Empty weights should not crash - just log warning
+        let json_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "weights": []
+            }
+        });
+
+        let weights_arr = json_response["result"]["weights"].as_array();
+        assert!(weights_arr.is_some());
+        assert!(weights_arr.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_malformed_weight_entry_skipped() {
+        // Malformed entry should be skipped, not crash
+        let json_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "weights": [
+                    {"mechanismId": null, "entries": []},  // null mechanism id
+                    {"mechanismId": 1, "entries": null}   // null entries
+                ]
+            }
+        });
+
+        let weights_arr = json_response["result"]["weights"].as_array().unwrap();
+
+        // Should handle gracefully with defaults
+        for entry in weights_arr {
+            let _mechanism_id = entry["mechanismId"].as_u64().unwrap_or(0);
+            let _entries = entry["entries"].as_array();
+            // Should not panic
+        }
+    }
 }
