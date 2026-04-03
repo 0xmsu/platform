@@ -17,8 +17,9 @@ use bittensor_rs::chain::{signer_from_seed, BittensorSigner, ExtrinsicWait};
 use clap::Parser;
 use parking_lot::RwLock;
 use platform_bittensor::{
-    spawn_weight_task, sync_metagraph, BittensorClient, BlockSync, BlockSyncConfig,
-    BlockSyncEvent, Metagraph, Subtensor, SubtensorClient, WeightTaskHandle,
+    spawn_background_weight_handler, spawn_weight_task, sync_metagraph, BittensorClient,
+    BlockSync, BlockSyncConfig, BlockSyncEvent, BackgroundWeightHandler, Metagraph, Subtensor,
+    SubtensorClient, WeightTaskHandle,
 };
 use platform_core::{
     checkpoint::{
@@ -541,6 +542,7 @@ async fn main() -> Result<()> {
     let mut bittensor_client_for_metagraph: Option<Arc<BittensorClient>>;
     let mut block_rx: Option<tokio::sync::mpsc::Receiver<BlockSyncEvent>> = None;
     let mut weight_task_handle: Option<WeightTaskHandle> = None;
+    let mut background_weight_handler: Option<BackgroundWeightHandler> = None;
 
     if !args.no_bittensor {
         info!("Connecting to Bittensor: {}", args.subtensor_endpoint);
@@ -722,6 +724,16 @@ async fn main() -> Result<()> {
                             our_uid,
                         ));
                         info!(uid = our_uid, "Weight submission task spawned");
+
+                        let http_client = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(30))
+                            .build()
+                            .expect("Failed to create HTTP client");
+                        background_weight_handler = Some(spawn_background_weight_handler(
+                            weight_task_handle.as_ref().unwrap().clone(),
+                            http_client,
+                        ));
+                        info!("Background hourly weight handler spawned");
 
                         if endpoint != &args.subtensor_endpoint {
                             warn!(
@@ -2339,6 +2351,9 @@ async fn main() -> Result<()> {
 
                         if let Some(ref handle) = weight_task_handle {
                             handle.shutdown().await;
+                        }
+                        if let Some(ref handler) = background_weight_handler {
+                            handler.shutdown().await;
                         }
                     }
                 ).await;

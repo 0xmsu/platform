@@ -32,6 +32,7 @@ pub enum WeightCommand {
 }
 
 /// Handle for controlling the weight submission task.
+#[derive(Clone)]
 pub struct WeightTaskHandle {
     tx: mpsc::Sender<WeightCommand>,
     queue: Arc<WeightSubmissionQueue>,

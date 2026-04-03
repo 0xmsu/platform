@@ -13,6 +13,7 @@
 //! The `BlockSync` module subscribes to finalized Bittensor blocks
 //! to synchronize platform epochs with on-chain state.
 
+mod background_weight_handler;
 mod block_sync;
 mod challenge_weight_collector;
 mod client;
@@ -24,6 +25,7 @@ mod weights;
 #[cfg(test)]
 mod tests;
 
+pub use background_weight_handler::*;
 pub use block_sync::*;
 pub use challenge_weight_collector::*;
 pub use client::*;
