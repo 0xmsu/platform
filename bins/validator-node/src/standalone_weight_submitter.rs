@@ -57,7 +57,10 @@ struct WeightEntry {
 /// Standalone weight submitter - no P2P dependencies
 /// Uses WeightSubmitter internally for CRv4 commit-reveal support
 pub struct StandaloneWeightSubmitter {
-    weight_submitter: Arc<Mutex<WeightSubmitter>>,
+    // Configuration stored to create fresh connections
+    endpoint: String,
+    netuid: u16,
+    signer_seed: String,
     http_client: Client,
     last_submission_hour: Arc<Mutex<Option<i64>>>,
     running: Arc<AtomicBool>,
@@ -74,21 +77,16 @@ impl StandaloneWeightSubmitter {
             .build()
             .expect("Failed to create HTTP client");
         
-        let config = BittensorConfig {
-            endpoint: endpoint.to_string(),
+        info!(
+            endpoint = %endpoint,
             netuid,
-            use_commit_reveal: true,
-            version_key: 1,
-        };
-        
-        let mut client = SubtensorClient::new(config);
-        client.connect().await?;
-        client.set_signer(signer_seed)?;
-        
-        let weight_submitter = WeightSubmitter::new(client, None);
+            "Standalone weight submitter initialized (will create fresh connection for each submission)"
+        );
         
         Ok(Self {
-            weight_submitter: Arc::new(Mutex::new(weight_submitter)),
+            endpoint: endpoint.to_string(),
+            netuid,
+            signer_seed: signer_seed.to_string(),
             http_client,
             last_submission_hour: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(true)),
@@ -193,8 +191,29 @@ impl StandaloneWeightSubmitter {
             })
             .collect();
         
-        let mut submitter = self.weight_submitter.lock().await;
-        submitter.submit_mechanism_weights_batch(&mechanism_weights).await?;
+        // Create FRESH Bittensor connection for this submission
+        info!(endpoint = %self.endpoint, "Creating fresh Bittensor connection...");
+        
+        let config = BittensorConfig {
+            endpoint: self.endpoint.clone(),
+            netuid: self.netuid,
+            use_commit_reveal: true,
+            version_key: 1,
+        };
+        
+        let mut client = SubtensorClient::new(config);
+        client.connect().await
+            .map_err(|e| anyhow::anyhow!("Bittensor connection failed to {}: {}", self.endpoint, e))?;
+        client.set_signer(&self.signer_seed)
+            .map_err(|e| anyhow::anyhow!("Failed to set signer: {}", e))?;
+        
+        let mut weight_submitter = WeightSubmitter::new(client, None);
+        
+        weight_submitter.submit_mechanism_weights_batch(&mechanism_weights).await?;
+        
+        info!("Weights submitted successfully, connection will be dropped");
+        
+        // Connection is automatically dropped when weight_submitter goes out of scope
         
         Ok(())
     }
