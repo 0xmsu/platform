@@ -695,10 +695,10 @@ impl Default for PeerMapping {
 }
 
 /// Default rate limit: maximum messages per second per signer
-const DEFAULT_RATE_LIMIT: u32 = 100;
+const DEFAULT_RATE_LIMIT: u32 = 10000;
 
 /// Rate limit sliding window in milliseconds (1 second)
-const RATE_LIMIT_WINDOW_MS: i64 = 1000;
+const RATE_LIMIT_WINDOW_MS: i64 = 10000;
 
 /// Nonce expiry time in milliseconds (5 minutes)
 const NONCE_EXPIRY_MS: i64 = 5 * 60 * 1000;
