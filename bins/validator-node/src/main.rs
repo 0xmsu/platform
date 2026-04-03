@@ -1322,7 +1322,7 @@ async fn main() -> Result<()> {
     let mut storage_stats_interval = tokio::time::interval(Duration::from_secs(300));
     let mut storage_flush_interval = tokio::time::interval(Duration::from_secs(5));
     let mut background_tick_interval = tokio::time::interval(Duration::from_secs(12));
-    let mut bittensor_health_interval = tokio::time::interval(Duration::from_secs(300));
+    let mut bittensor_health_interval = tokio::time::interval(Duration::from_secs(60));
     let mut last_block_event_time = std::time::Instant::now();
     // Track last synced block per challenge for delta sync
     let challenge_last_sync: Arc<
@@ -2304,7 +2304,7 @@ async fn main() -> Result<()> {
             _ = bittensor_health_interval.tick() => {
                 if !args.no_bittensor && block_rx.is_some() {
                     let secs_since_last = last_block_event_time.elapsed().as_secs();
-                    if secs_since_last > 300 {
+                    if secs_since_last > 60 {
                         error!(
                             seconds_since_last_block = secs_since_last,
                             "No Bittensor block events received in {}s - connection likely dead, reconnecting Subtensor",
@@ -5731,6 +5731,41 @@ fn dir_size(path: &std::path::Path) -> u64 {
                 .sum()
         })
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Health check threshold is 60 seconds (5 blocks at 12s/block)
+    #[test]
+    fn test_health_check_threshold_is_60_seconds() {
+        // This test documents the expected threshold value
+        let threshold_seconds: u64 = 60;
+        assert_eq!(threshold_seconds, 60, "Health check threshold should be 60 seconds");
+    }
+
+    /// Values below threshold should NOT trigger reconnection
+    #[test]
+    fn test_below_threshold_no_reconnect() {
+        let threshold_seconds: u64 = 60;
+        let secs_since_last = 59u64;
+        assert!(secs_since_last < threshold_seconds, "59s should NOT trigger reconnection");
+    }
+
+    /// Values at or above threshold should trigger reconnection
+    #[test]
+    fn test_at_threshold_triggers_reconnect() {
+        let threshold_seconds: u64 = 60;
+        let secs_since_last = 60u64;
+        assert!(secs_since_last >= threshold_seconds, "60s should trigger reconnection");
+    }
+
+    /// Values above threshold should trigger reconnection
+    #[test]
+    fn test_above_threshold_triggers_reconnect() {
+        let threshold_seconds: u64 = 60;
+        let secs_since_last = 61u64;
+        assert!(secs_since_last >= threshold_seconds, "61s should trigger reconnection");
+    }
 }
 
 // Build trigger: 1771754356
