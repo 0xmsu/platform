@@ -739,12 +739,19 @@ async fn main() -> Result<()> {
                         info!("Background hourly weight handler spawned");
 
                         // Spawn standalone hourly weight submitter (decoupled from P2P)
-                        standalone_weight_submitter = Some(spawn_standalone_weight_submitter(
-                            subtensor.as_ref().unwrap().clone(),
-                            (**subtensor_signer.as_ref().unwrap()).clone(),
+                        match spawn_standalone_weight_submitter(
+                            endpoint,
                             args.netuid,
-                        ));
-                        info!("Standalone hourly weight submitter spawned");
+                            secret,
+                        ).await {
+                            Ok(handle) => {
+                                standalone_weight_submitter = Some(handle);
+                                info!("Standalone hourly weight submitter spawned");
+                            }
+                            Err(e) => {
+                                error!("Failed to spawn standalone weight submitter: {}", e);
+                            }
+                        }
 
                         if endpoint != &args.subtensor_endpoint {
                             warn!(
